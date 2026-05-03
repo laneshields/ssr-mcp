@@ -15,6 +15,7 @@ class SSRClient:
         self.password = password
         self._token: str | None = None
         self._http = httpx.AsyncClient(verify=verify_ssl, base_url=self.base_url, timeout=30.0)
+        self._schema_fields: dict[str, set[str]] = {}
 
     async def _login(self) -> None:
         response = await self._http.post(
@@ -23,6 +24,42 @@ class SSRClient:
         )
         response.raise_for_status()
         self._token = response.json()["token"]
+        await self._fetch_schema()
+
+    async def _fetch_schema(self) -> None:
+        """Fetch GraphQL schema via introspection and cache field names per type.
+
+        Called once per login. If it fails (network error, unsupported), the cache
+        remains empty and callers fall back to conservative (reduced) queries.
+        """
+        if self._schema_fields:
+            return
+        try:
+            headers = {"Authorization": f"Bearer {self._token}"}
+            query = "{ __schema { types { name fields { name } } } }"
+            response = await self._http.post(
+                "/api/v1/graphql", headers=headers, json={"query": query}
+            )
+            if not response.is_success:
+                return
+            for t in response.json().get("data", {}).get("__schema", {}).get("types", []):
+                name = t.get("name")
+                fields = t.get("fields") or []
+                if name:
+                    self._schema_fields[name] = {f["name"] for f in fields}
+        except Exception:
+            pass
+
+    def _has_field(self, type_name: str, field_name: str) -> bool:
+        """Return True if field_name is present on type_name in the cached schema."""
+        return field_name in self._schema_fields.get(type_name, set())
+
+    def _type_for_fields(self, *required_fields: str) -> str | None:
+        """Return the name of the first GraphQL type that contains all required_fields."""
+        for type_name, type_fields in self._schema_fields.items():
+            if all(f in type_fields for f in required_fields):
+                return type_name
+        return None
 
     async def _get(self, path: str, params: dict | None = None) -> Any:
         if not self._token:
@@ -520,12 +557,14 @@ class SSRClient:
         detail: bool = False,
     ) -> dict:
         variables = {"routerName": router, "peerName": peer_name, "isDetail": detail}
-        try:
-            return await self._graphql(self._PEER_PATHS_QUERY, variables)
-        except Exception as e:
-            if "400" in str(e):
-                return await self._graphql(self._PEER_PATHS_QUERY_COMPAT, variables)
-            raise
+        # keyExchangeAlgorithm was introduced alongside the other post-6.3.x detail fields;
+        # its presence reliably signals that the full query is safe to use.
+        query = (
+            self._PEER_PATHS_QUERY
+            if self._has_field("RouterPeerPathType", "keyExchangeAlgorithm")
+            else self._PEER_PATHS_QUERY_COMPAT
+        )
+        return await self._graphql(query, variables)
 
     _FIND_SESSIONS_QUERY = """
     query FindSessions($filterString: String, $first: Int!) {
@@ -1865,12 +1904,15 @@ class SSRClient:
         node: str | None = None,
     ) -> dict:
         variables = {"sessionId": session_id, "routerName": router, "nodeName": node}
-        try:
-            return await self._graphql(self._SESSION_DETAIL_QUERY_WITH_SOURCE_PEER, variables)
-        except Exception as e:
-            if "400" in str(e):
-                return await self._graphql(self._SESSION_DETAIL_QUERY, variables)
-            raise
+        # sourcePeerName was added in a later SSR release; find the session type
+        # dynamically so the check doesn't depend on knowing the exact type name.
+        session_type = self._type_for_fields("sessionId", "peerName", "serviceName")
+        query = (
+            self._SESSION_DETAIL_QUERY_WITH_SOURCE_PEER
+            if session_type and self._has_field(session_type, "sourcePeerName")
+            else self._SESSION_DETAIL_QUERY
+        )
+        return await self._graphql(query, variables)
 
     # ------------------------------------------------------------------
     # Config
