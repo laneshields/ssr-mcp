@@ -460,8 +460,6 @@ class SSRClient:
                 latency
                 jitter
                 loss
-                mos
-                hops
               }
               paths @include(if: $isDetail) {
                 peerReceivedAddress
@@ -479,16 +477,55 @@ class SSRClient:
     }
     """
 
+    # Fallback for SSR versions that don't support all detail fields (e.g. 6.3.x)
+    _PEER_PATHS_QUERY_COMPAT = """
+    query GetPeers(
+      $routerName: String
+      $peerName: String
+      $isDetail: Boolean!
+    ) {
+      allRouters(name: $routerName) {
+        nodes {
+          peers(name: $peerName) {
+            nodes {
+              name
+              router { name }
+              paths {
+                displayName
+                node
+                networkInterface
+                adjacentAddress
+                adjacentHostname
+                status
+                mtu
+                uptime
+                latency
+                jitter
+                loss
+              }
+              paths @include(if: $isDetail) {
+                peerReceivedAddress
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
     async def get_peer_paths(
         self,
         router: str | None = None,
         peer_name: str | None = None,
         detail: bool = False,
     ) -> dict:
-        return await self._graphql(
-            self._PEER_PATHS_QUERY,
-            {"routerName": router, "peerName": peer_name, "isDetail": detail},
-        )
+        variables = {"routerName": router, "peerName": peer_name, "isDetail": detail}
+        try:
+            return await self._graphql(self._PEER_PATHS_QUERY, variables)
+        except Exception as e:
+            if "400" in str(e):
+                return await self._graphql(self._PEER_PATHS_QUERY_COMPAT, variables)
+            raise
 
     _FIND_SESSIONS_QUERY = """
     query FindSessions($filterString: String, $first: Int!) {
@@ -1721,7 +1758,6 @@ class SSRClient:
                 interNode
                 interRouter
                 peerName
-                sourcePeerName
                 commonNameInfo
                 appIdentification {
                   application
@@ -1817,16 +1853,24 @@ class SSRClient:
     }
     """
 
+    _SESSION_DETAIL_QUERY_WITH_SOURCE_PEER = _SESSION_DETAIL_QUERY.replace(
+        "                peerName\n                commonNameInfo",
+        "                peerName\n                sourcePeerName\n                commonNameInfo",
+    )
+
     async def get_session(
         self,
         session_id: str,
         router: str,
         node: str | None = None,
     ) -> dict:
-        return await self._graphql(
-            self._SESSION_DETAIL_QUERY,
-            {"sessionId": session_id, "routerName": router, "nodeName": node},
-        )
+        variables = {"sessionId": session_id, "routerName": router, "nodeName": node}
+        try:
+            return await self._graphql(self._SESSION_DETAIL_QUERY_WITH_SOURCE_PEER, variables)
+        except Exception as e:
+            if "400" in str(e):
+                return await self._graphql(self._SESSION_DETAIL_QUERY, variables)
+            raise
 
     # ------------------------------------------------------------------
     # Config
