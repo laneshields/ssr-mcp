@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ssr_mcp.client import SSRClient
 
-load_dotenv()
+load_dotenv(pathlib.Path(__file__).parent.parent / ".env", override=True)
 
 mcp = FastMCP("SSR — Session Smart Router")
 
@@ -76,7 +76,8 @@ def get_client() -> SSRClient:
         username = os.environ["SSR_USERNAME"]
         password = os.environ["SSR_PASSWORD"]
         verify_ssl = os.environ.get("SSR_VERIFY_SSL", "true").lower() != "false"
-        _client = SSRClient(host, username, password, verify_ssl)
+        port = int(os.environ.get("SSR_PORT", "443"))
+        _client = SSRClient(host, username, password, verify_ssl, port)
     return _client
 
 

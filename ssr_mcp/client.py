@@ -9,8 +9,8 @@ from typing import Any
 class SSRClient:
     """Async REST client for the SSR API. Handles JWT auth automatically."""
 
-    def __init__(self, host: str, username: str, password: str, verify_ssl: bool = True):
-        self.base_url = f"https://{host}"
+    def __init__(self, host: str, username: str, password: str, verify_ssl: bool = True, port: int = 443):
+        self.base_url = f"https://{host}:{port}"
         self.username = username
         self.password = password
         self._token: str | None = None
