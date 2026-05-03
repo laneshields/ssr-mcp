@@ -2041,7 +2041,27 @@ class SSRClient:
         params: dict = {"addressFamily": address_family, "vrf": vrf}
         if neighbor:
             params["neighborAddress"] = neighbor
-        return await self._get(f"/api/v1/router/{router}/routing/bgp/neighbors", params=params)
+
+        neighbors_data, services_data = await asyncio.gather(
+            self._get(f"/api/v1/router/{router}/routing/bgp/neighbors", params=params),
+            self.get_services(router, filter='"service_name"~"_bgp_"'),
+        )
+
+        svr_ips: set[str] = set()
+        for rtr_node in (
+            services_data.get("data", {}).get("allRouters", {}).get("nodes", [])
+        ):
+            for node in rtr_node.get("nodes", {}).get("nodes", []):
+                for svc in node.get("serviceInfo", []):
+                    if not svc.get("serviceName", "").startswith("_bgp_"):
+                        continue
+                    for prefix in svc.get("prefixes", []):
+                        if isinstance(prefix, str) and prefix.endswith("/32"):
+                            svr_ips.add(prefix[:-3])
+
+        result = dict(neighbors_data) if isinstance(neighbors_data, dict) else {"data": neighbors_data}
+        result["_svr_neighbors"] = sorted(svr_ips)
+        return result
 
     # ------------------------------------------------------------------
     # Ping

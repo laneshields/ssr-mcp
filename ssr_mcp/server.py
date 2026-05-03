@@ -1840,6 +1840,11 @@ async def get_bgp_neighbors(
     capabilities, address family info (accepted/sent prefix counts, route-maps),
     graceful restart state, last reset reason, and estimated RTT.
 
+    Also includes a top-level '_svr_neighbors' list of neighbor IPs that are
+    BGP-over-SVR peers (detected by the presence of a '_bgp_<ip>/32' service).
+    Neighbors whose IP appears in '_svr_neighbors' use SVR transport; all others
+    are standard BGP over IP.
+
     Context: router
 
     Args:
