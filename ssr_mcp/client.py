@@ -1998,6 +1998,15 @@ class SSRClient:
         params = {"addressFamily": address_family, "vrf": vrf}
         return await self._get(f"/api/v1/router/{router}/routing/bgp/summary", params=params)
 
+    async def get_bgp_routes(
+        self,
+        router: str,
+        vrf: str = "default",
+        address_family: str = "ipv4",
+    ) -> dict:
+        params = {"addressFamily": address_family, "vrf": vrf}
+        return await self._get(f"/api/v1/router/{router}/routing/bgp", params=params)
+
     async def get_bgp_advertised_routes(
         self,
         router: str,

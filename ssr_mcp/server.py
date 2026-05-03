@@ -1755,6 +1755,29 @@ async def get_bgp_summary(
 
 
 @mcp.tool()
+async def get_bgp_routes(
+    router: str,
+    vrf: str = "default",
+    address_family: str = "ipv4",
+) -> str:
+    """Get the full BGP routing table — equivalent to 'show bgp'.
+
+    Returns every prefix with all candidate paths. Each path includes:
+    bestpath flag, selection reason, AS path, origin, metric, weight,
+    peer ID, and nexthops with hostnames.
+
+    Context: router
+
+    Args:
+        router:         Router name (required).
+        vrf:            VRF name. Default 'default'.
+        address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+    """
+    result = await get_client().get_bgp_routes(router, vrf, address_family)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def get_bgp_advertised_routes(
     router: str,
     neighbor: str,
