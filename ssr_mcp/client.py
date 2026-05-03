@@ -1986,6 +1986,55 @@ class SSRClient:
         return await self._post(f"/api/v1/router/{router}/metrics", body)
 
     # ------------------------------------------------------------------
+    # BGP
+    # ------------------------------------------------------------------
+
+    async def get_bgp_summary(
+        self,
+        router: str,
+        vrf: str = "default",
+        address_family: str = "all",
+    ) -> dict:
+        params = {"addressFamily": address_family, "vrf": vrf}
+        return await self._get(f"/api/v1/router/{router}/routing/bgp/summary", params=params)
+
+    async def get_bgp_advertised_routes(
+        self,
+        router: str,
+        neighbor: str,
+        vrf: str = "default",
+        address_family: str = "ipv4",
+    ) -> dict:
+        params = {"addressFamily": address_family, "neighborAddress": neighbor, "vrf": vrf}
+        return await self._get(
+            f"/api/v1/router/{router}/routing/bgp/neighbors/advertised-routes", params=params
+        )
+
+    async def get_bgp_received_routes(
+        self,
+        router: str,
+        neighbor: str,
+        vrf: str = "default",
+        address_family: str = "ipv4",
+    ) -> dict:
+        params = {"addressFamily": address_family, "neighborAddress": neighbor, "vrf": vrf}
+        return await self._get(
+            f"/api/v1/router/{router}/routing/bgp/neighbors/received-routes", params=params
+        )
+
+    async def get_bgp_neighbors(
+        self,
+        router: str,
+        vrf: str = "default",
+        address_family: str = "ipv4",
+        neighbor: str | None = None,
+    ) -> dict:
+        params: dict = {"addressFamily": address_family, "vrf": vrf}
+        if neighbor:
+            params["neighborAddress"] = neighbor
+        return await self._get(f"/api/v1/router/{router}/routing/bgp/neighbors", params=params)
+
+    # ------------------------------------------------------------------
     # Ping
     # ------------------------------------------------------------------
 

@@ -1731,6 +1731,105 @@ async def query_metrics(
 
 
 @mcp.tool()
+async def get_bgp_summary(
+    router: str,
+    vrf: str = "default",
+    address_family: str = "all",
+) -> str:
+    """Get BGP summary for a router — equivalent to 'show bgp summary'.
+
+    Returns structured per-address-family data including router ID, local AS,
+    RIB counts, and a per-peer breakdown with state, uptime, prefix counts,
+    connections established/dropped, and hostname.
+
+    Context: router
+
+    Args:
+        router:         Router name (required).
+        vrf:            VRF name. Default 'default'.
+        address_family: Address family to query. Default 'all'.
+                        Other values: 'ipv4', 'ipv6'.
+    """
+    result = await get_client().get_bgp_summary(router, vrf, address_family)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def get_bgp_advertised_routes(
+    router: str,
+    neighbor: str,
+    vrf: str = "default",
+    address_family: str = "ipv4",
+) -> str:
+    """Get BGP routes advertised to a specific neighbor — equivalent to
+    'show bgp neighbors <neighbor> advertised-routes'.
+
+    Returns each advertised prefix with next-hop, AS path, origin code,
+    metric, weight, and applied status symbols.
+
+    Context: router
+
+    Args:
+        router:         Router name (required).
+        neighbor:       Neighbor IP address (required).
+        vrf:            VRF name. Default 'default'.
+        address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+    """
+    result = await get_client().get_bgp_advertised_routes(router, neighbor, vrf, address_family)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def get_bgp_received_routes(
+    router: str,
+    neighbor: str,
+    vrf: str = "default",
+    address_family: str = "ipv4",
+) -> str:
+    """Get BGP routes received from a specific neighbor — equivalent to
+    'show bgp neighbors <neighbor> received-routes'.
+
+    Returns each received prefix with next-hop, AS path, origin code, metric,
+    weight, and applied status symbols (valid, best, etc.).
+
+    Context: router
+
+    Args:
+        router:         Router name (required).
+        neighbor:       Neighbor IP address (required).
+        vrf:            VRF name. Default 'default'.
+        address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+    """
+    result = await get_client().get_bgp_received_routes(router, neighbor, vrf, address_family)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def get_bgp_neighbors(
+    router: str,
+    vrf: str = "default",
+    address_family: str = "ipv4",
+    neighbor: str | None = None,
+) -> str:
+    """Get detailed BGP neighbor information — equivalent to 'show bgp neighbors'.
+
+    Returns per-neighbor detail including BGP state, uptime, message stats,
+    capabilities, address family info (accepted/sent prefix counts, route-maps),
+    graceful restart state, last reset reason, and estimated RTT.
+
+    Context: router
+
+    Args:
+        router:         Router name (required).
+        vrf:            VRF name. Default 'default'.
+        address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+        neighbor:       Filter to a specific neighbor IP. Omit for all neighbors.
+    """
+    result = await get_client().get_bgp_neighbors(router, vrf, address_family, neighbor)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def ping(
     router: str,
     node: str,
