@@ -27,7 +27,10 @@ SSR_HOST=<conductor-ip-or-hostname>
 SSR_USERNAME=admin
 SSR_PASSWORD=<password>
 SSR_VERIFY_SSL=false   # set false for self-signed certs (common in SSR deployments)
+SSR_PORT=443           # override if conductor listens on a non-standard HTTPS port
 ```
+
+**Credential management**: credentials must live in `.env` only. Do **not** put them in the Claude Desktop `env` block (`claude_desktop_config.json`) or the Claude Code MCP user config (`~/.claude.json` env block) — those values are injected as process environment variables before the server starts and will silently override `.env`. The server uses `load_dotenv(override=True)` with an explicit path so `.env` always wins, but the cleanest setup is to keep credentials out of those config files entirely.
 
 ## Connection modes
 
@@ -62,8 +65,12 @@ Two files make up the entire package:
 **`ssr_mcp/client.py` — `SSRClient`**
 Async httpx client targeting the SSR REST and GraphQL APIs. Handles JWT authentication lazily (login deferred until first request) and retries automatically on 401 by re-authenticating once. All REST calls go through `_get()`; GraphQL calls go through `_graphql()`. GraphQL queries are stored as class-level string constants directly above the method that uses them. Paginated endpoints loop internally at `page_size=1000` using either cursor-based (`pageInfo.endCursor`) or offset-based pagination — callers never see pages.
 
+Accepts `port: int = 443` in `__init__`; base URL is `https://{host}:{port}`.
+
 **`ssr_mcp/server.py` — FastMCP tool definitions**
 Thin `@mcp.tool()` wrappers around every `SSRClient` method. Each tool serialises the result to JSON and returns it as a string. The client singleton is created lazily via `get_client()` on first tool call so the server starts cleanly even without `.env` credentials. Tool docstrings double as the MCP tool descriptions seen by Claude — keep them accurate and include all `Args:` entries.
+
+`load_dotenv` is called with the explicit path `Path(__file__).parent.parent / ".env"` and `override=True` so the repo's `.env` always takes precedence over any env vars injected by the MCP host.
 
 ## Tool-call logging
 
@@ -87,6 +94,20 @@ jq -r '[.tool, .response_chars] | @tsv' ~/.ssr-mcp/tool_calls.jsonl \
   | awk -F'\t' '{sum[$1]+=$2; count[$1]++} END {for (t in sum) printf "%d\t%s\n", sum[t]/count[t], t}' \
   | sort -rn
 ```
+
+## BGP tools
+
+BGP data comes from the FRR-backed JSON REST endpoints under `/api/v1/router/{router}/routing/bgp/`. These return structured JSON (not CLI text) and are the same source used by the SSR management GUI.
+
+| Tool | Endpoint | Notes |
+|---|---|---|
+| `get_bgp_summary` | `GET /routing/bgp/summary` | Neighbor state counts; `address_family=all` by default |
+| `get_bgp_neighbors` | `GET /routing/bgp/neighbors` | Per-neighbor detail; optional `neighbor` filter |
+| `get_bgp_received_routes` | `GET /routing/bgp/neighbors/received-routes` | Routes received from a specific neighbor |
+| `get_bgp_advertised_routes` | `GET /routing/bgp/neighbors/advertised-routes` | Routes advertised to a specific neighbor |
+| `get_bgp_routes` | `GET /routing/bgp` | Full BGP RIB (all prefixes across all neighbors) |
+
+All BGP tools accept `router`, `vrf` (default `"default"`), and `address_family` (default `"ipv4"` or `"all"` depending on tool) parameters.
 
 ## Adding a new tool
 
