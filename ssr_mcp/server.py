@@ -13,7 +13,47 @@ from ssr_mcp.client import SSRClient
 
 load_dotenv(pathlib.Path(__file__).parent.parent / ".env", override=True)
 
-mcp = FastMCP("SSR — Session Smart Router")
+# ------------------------------------------------------------------
+# HTTP transport configuration
+# ------------------------------------------------------------------
+
+_TRANSPORT = os.environ.get("SSR_MCP_TRANSPORT", "stdio")
+_HOST = os.environ.get("SSR_MCP_HOST", "127.0.0.1")
+_PORT = int(os.environ.get("SSR_MCP_PORT", "8000"))
+_AUTH_TOKEN = os.environ.get("SSR_MCP_AUTH_TOKEN")
+
+
+class _BearerAuthMiddleware:
+    """Pure-ASGI bearer token gate. Passes lifespan/websocket scopes through unchanged."""
+
+    def __init__(self, app: object, token: str) -> None:
+        self._app = app
+        self._token = token
+
+    async def __call__(self, scope: dict, receive: object, send: object) -> None:
+        if scope["type"] == "http":
+            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            auth = headers.get(b"authorization", b"").decode()
+            if not (auth.startswith("Bearer ") and auth[7:] == self._token):
+                await self._reject(scope, send)
+                return
+        await self._app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(scope: dict, send: object) -> None:
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [[b"www-authenticate", b"Bearer"], [b"content-length", b"12"]],
+        })
+        await send({"type": "http.response.body", "body": b"Unauthorized"})
+
+
+mcp = FastMCP(
+    "SSR — Session Smart Router",
+    host=_HOST,
+    port=_PORT,
+)
 
 # ------------------------------------------------------------------
 # Tool-call logging
@@ -1900,7 +1940,24 @@ async def ping(
 
 
 def main() -> None:
-    mcp.run()
+    if _TRANSPORT == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    import anyio
+    import uvicorn
+
+    async def _serve() -> None:
+        if _TRANSPORT == "streamable-http":
+            app: object = mcp.streamable_http_app()
+        else:
+            app = mcp.sse_app()
+        if _AUTH_TOKEN:
+            app = _BearerAuthMiddleware(app, _AUTH_TOKEN)
+        config = uvicorn.Config(app, host=_HOST, port=_PORT)
+        await uvicorn.Server(config).serve()
+
+    anyio.run(_serve)
 
 
 if __name__ == "__main__":

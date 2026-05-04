@@ -32,6 +32,23 @@ SSR_PORT=443           # override if conductor listens on a non-standard HTTPS p
 
 **Credential management**: credentials must live in `.env` only. Do **not** put them in the Claude Desktop `env` block (`claude_desktop_config.json`) or the Claude Code MCP user config (`~/.claude.json` env block) — those values are injected as process environment variables before the server starts and will silently override `.env`. The server uses `load_dotenv(override=True)` with an explicit path so `.env` always wins, but the cleanest setup is to keep credentials out of those config files entirely.
 
+## HTTP transport (remote server)
+
+By default the server runs over `stdio`. To run as a remote HTTP server, set `SSR_MCP_TRANSPORT` to `sse` or `streamable-http` (preferred — MCP spec 2025-03-26):
+
+```
+SSR_MCP_TRANSPORT=streamable-http
+SSR_MCP_HOST=0.0.0.0      # bind address (default 127.0.0.1)
+SSR_MCP_PORT=8000          # listen port (default 8000)
+SSR_MCP_AUTH_TOKEN=<secret> # bearer token; omit to disable auth
+```
+
+Connect Claude Code or Claude Desktop to `http://<host>:8000/mcp` (streamable-http) or `http://<host>:8000/sse` (sse).
+
+**Auth**: when `SSR_MCP_AUTH_TOKEN` is set and transport is not `stdio`, every HTTP request must carry `Authorization: Bearer <token>`. Requests without a valid token are rejected. Auth is silently skipped for `stdio` even if the env var is set.
+
+**Credentials in remote mode**: the `.env` file (or plain environment variables) stays on the server. `load_dotenv(override=True)` wins over injected vars when `.env` exists; if `.env` is absent (e.g., a container that sets vars directly), `load_dotenv` is a no-op and the container env vars are used as-is.
+
 ## Connection modes
 
 `SSR_HOST` can point to a conductor or directly to a router. Call
