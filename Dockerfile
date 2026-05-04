@@ -11,7 +11,7 @@ COPY ssr_mcp/ ./ssr_mcp/
 RUN uv sync --frozen
 
 # Run as non-root
-RUN useradd -r -s /sbin/nologin app
+RUN useradd -r -s /sbin/nologin app && chown -R app:app /app
 USER app
 
 EXPOSE 8000
