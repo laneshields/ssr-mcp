@@ -93,6 +93,12 @@ Thin `@mcp.tool()` wrappers around every `SSRClient` method. Each tool serialise
 
 Every tool call is appended as a JSON line to `~/.ssr-mcp/tool_calls.jsonl` (override with `SSR_MCP_LOG_FILE`). Each record contains the UTC timestamp, tool name, arguments, and response character count.
 
+**Docker default:** the Dockerfile sets `SSR_MCP_LOG_FILE=/var/log/ssr-mcp/tool_calls.jsonl`. Mount a volume at `/var/log/ssr-mcp` to persist logs across container restarts:
+
+```
+docker run ... -v /host/path/logs:/var/log/ssr-mcp ssr-mcp
+```
+
 ```bash
 # Which tools are called most often
 jq -r '.tool' ~/.ssr-mcp/tool_calls.jsonl | sort | uniq -c | sort -rn
