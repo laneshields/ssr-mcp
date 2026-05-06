@@ -295,15 +295,22 @@ class SSRClient:
         dest_ip: str,
         dest_port: int,
         protocol: str,
-        tenant: str,
+        tenant: str | None = None,
+        source_ip: str | None = None,
+        source_interface: str | None = None,
     ) -> dict:
-        params = {
+        params: dict = {
             "destIp": dest_ip,
             "destPort": dest_port,
             "protocol": protocol,
-            "tenant": tenant,
             "detail": "true",
         }
+        if tenant:
+            params["tenant"] = tenant
+        if source_ip:
+            params["sourceIp"] = source_ip
+        if source_interface:
+            params["sourceInterface"] = source_interface
         return await self._get(
             f"/api/v1/router/{router}/node/{node}/traffic/fib/lookup",
             params=params,

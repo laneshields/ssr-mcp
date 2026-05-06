@@ -587,6 +587,21 @@ async def get_network_interfaces(
     configured and DHCP-resolved IP addresses, gateway, prefix length,
     and the operational status of the underlying device interface.
 
+    Each interface includes a globalId field — this is the internal global
+    interface ID (giid) used by the routing stack. RIB next-hop entries
+    reference interfaces by giid in the format 'gX' (e.g. 'g12'). Match the
+    number X against globalId to resolve a giid to a network interface name.
+
+    To resolve a source IP to a network interface name for fib_lookup:
+      1. Check whether the source IP falls within the subnet of any interface
+         whose deviceInterface.type is 'ethernet' (forwarding interfaces).
+         If it matches, that interface name is the source_interface. Ignore
+         host-type device interfaces — these are internal SSR interfaces.
+      2. If no subnet matches (off-network source), call get_rib with the
+         source IP to get the LPM next-hop, extract the giid from
+         interfaceName (e.g. 'g12'), then match against globalId here to
+         get the interface name.
+
     Args:
         router:            (optional) Limit to a specific router.
         node:              (optional) Limit to a specific node.
@@ -836,21 +851,47 @@ async def fib_lookup(
     dest_ip: str,
     dest_port: int,
     protocol: str,
-    tenant: str,
+    tenant: str | None = None,
+    source_ip: str | None = None,
+    source_interface: str | None = None,
 ) -> str:
-    """Look up the FIB entry that would be matched for a specific packet,
-    given its destination IP, port, protocol, and source tenant. Returns
-    the service and next-hop the dataplane would select for that traffic.
+    """Look up the FIB entry that would be matched for a specific packet.
+    Returns the matched service name and next-hop(s) the dataplane would
+    select, including the resolved tenant.
+
+    Use this when you know the source and destination details for a flow
+    that is not working — it gives a definitive answer about what the
+    dataplane would do with that traffic. Use get_dropped_packets instead
+    when you don't have specific flow details.
+
+    Two ways to identify the source:
+      source_ip + source_interface — provide the client IP and the ingress
+          network interface name. The router resolves the tenant automatically.
+          Prefer this when the tenant name is not already known. Use
+          get_network_interfaces to resolve source_interface from the source IP.
+
+      tenant — provide the tenant name directly. Use when you already know
+          the tenant from a prior tool call (e.g. get_dropped_packets output
+          or list_tenant_members).
+
+    The response includes the matched service name. Pass that to
+    list_service_paths to check whether the service's paths are up.
 
     Args:
-        router:    Router name (required).
-        node:      Node name (required).
-        dest_ip:   Destination IP address, e.g. '1.1.1.1'.
-        dest_port: Destination L4 port, e.g. 53.
-        protocol:  IP protocol, e.g. 'udp' or 'tcp'.
-        tenant:    Source tenant name, e.g. 'lan.corp'.
+        router:           Router name (required).
+        node:             Node name (required).
+        dest_ip:          Destination IP address, e.g. '1.1.1.1'.
+        dest_port:        Destination L4 port, e.g. 53.
+        protocol:         IP protocol, e.g. 'udp', 'tcp', 'icmp'.
+        tenant:           Source tenant name — use if already known.
+        source_ip:        Source IP address — use with source_interface to
+                          resolve tenant automatically.
+        source_interface: Ingress network interface name, e.g. 'home_lan' —
+                          use with source_ip.
     """
-    data = await get_client().fib_lookup(router, node, dest_ip, dest_port, protocol, tenant)
+    data = await get_client().fib_lookup(
+        router, node, dest_ip, dest_port, protocol, tenant, source_ip, source_interface
+    )
     return json.dumps(data, indent=2)
 
 
@@ -989,10 +1030,18 @@ async def get_rib(
     WARNING: Unfiltered calls may return thousands of routes. Use ip or vrf
     to narrow results.
 
+    Passing a host address to ip (e.g. '192.168.1.50') returns the
+    longest-prefix match for that address, which is useful for determining
+    which interface traffic from an off-network source arrives on. Next-hop
+    interfaceName values use the internal giid format ('g2', 'g0', etc.) —
+    match the number against the globalId field in get_network_interfaces
+    output to resolve to the actual network interface name.
+
     Args:
         router:      Router name (required).
         vrf:         (optional) Filter by VRF name.
-        ip:          (optional) Filter by IP prefix, e.g. '10.0.0.0/8'.
+        ip:          (optional) Host address or prefix for LPM lookup,
+                     e.g. '192.168.1.50' or '10.0.0.0/8'.
         filter:      (optional) Additional filter string.
         sub_command: (optional) RibSubCommand enum value.
         limit:       Max entries to return. Omit to return all entries.
@@ -1405,13 +1454,25 @@ async def get_dropped_packets(
     regardless of outcome, so identifying and fixing drop patterns frees
     service area capacity for legitimate traffic.
 
+    Use this in two situations:
+      1. Connectivity broken, no specific flow details — unfiltered, it shows
+         what traffic is failing and why across the whole node, which is often
+         enough to identify the root cause without knowing the source or
+         destination in advance.
+      2. Service area CPU is unexpectedly high — drops consume service area
+         CPU even when no user is aware of the failing traffic (e.g. a flood
+         of unmatched packets, a misconfigured client, or a port scan). Use
+         this alongside get_node_utilization or get_session_processor_utilization
+         to investigate elevated CPU with no obvious active-session explanation.
+
+    When you do have specific flow details, use filters to narrow the stream
+    to that traffic, or use fib_lookup instead for a definitive answer on
+    what the dataplane would do with a specific packet.
+
     Returns a pattern summary: drops by reason, by ingress interface, top
     source IPs, top destination IP:port pairs, and protocol breakdown. This
     is usually enough to identify the root cause and the configuration change
     needed to resolve it.
-
-    Filters are applied server-side before events are streamed, so use them
-    to narrow a noisy stream to specific traffic of interest.
 
     Common drop reasons:
       ACCESS          — no matching service or tenant access denied
