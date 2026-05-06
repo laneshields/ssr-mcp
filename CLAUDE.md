@@ -99,6 +99,8 @@ Every tool call is appended as a JSON line to `~/.ssr-mcp/tool_calls.jsonl` (ove
 docker run ... -v /host/path/logs:/var/log/ssr-mcp ssr-mcp
 ```
 
+Docker users should substitute `/var/log/ssr-mcp/tool_calls.jsonl` (or the host path of the mounted volume) for `~/.ssr-mcp/tool_calls.jsonl` in the examples below.
+
 ```bash
 # Which tools are called most often
 jq -r '.tool' ~/.ssr-mcp/tool_calls.jsonl | sort | uniq -c | sort -rn
