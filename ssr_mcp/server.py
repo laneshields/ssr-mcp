@@ -611,10 +611,12 @@ async def get_sessions(
 ) -> str:
     """Get active forwarding sessions on a router node.
 
-    Use summarize=True for broad questions ("what services are active?",
-    "what is this tenant doing?", "how much encrypted traffic?"). It returns
-    per-(service, tenant, protocol) counts instead of individual flows, which
-    is orders of magnitude smaller on a busy router.
+    Use summarize=True to get session counts grouped by (service, tenant,
+    protocol) with an encrypted/unencrypted breakdown. This is useful for
+    questions like "how many sessions does this tenant have per service?" or
+    "how much traffic is encrypted?" Note: summarize returns session counts
+    only — for bandwidth use list_services (per-service) or get_top_sources
+    (per-client).
 
     Use summarize=False (default) only when you need individual flow detail —
     specific IPs, ports, or UUIDs. Always pair with a filter or a small limit
@@ -950,8 +952,13 @@ async def get_top_sources(
     limit: int = 10,
     order_by: str = "TOTAL_DATA",
 ) -> str:
-    """Get the most active client sources on a router, ranked by a traffic
+    """Get the most active client source IPs on a router, ranked by a traffic
     metric. Shows tenant, IP, current bandwidth, total data, and session count.
+
+    Use this to answer "who is using the most bandwidth?" — it identifies
+    specific clients rather than services or applications. For what services
+    are carrying traffic use list_services; for which applications are in use
+    use get_application_series (requires app-id http/https mode).
 
     Args:
         router:   (optional) Limit to a specific router.
@@ -1266,11 +1273,15 @@ async def list_services(
     node: str | None = None,
     filter: str | None = None,
 ) -> str:
-    """List configured services with their current operational status and
-    live traffic metrics (session count, bandwidth in/out).
+    """List configured services with live traffic metrics (session count,
+    bandwidth in/out) and service configuration (prefixes, transport, policy,
+    service routes, access lists).
 
-    Combines service configuration (prefixes, transport, policy, service routes,
-    access lists) with aggregate per-service metrics in a single call.
+    Use this as the first stop for any bandwidth or traffic volume question.
+    Every session on the router matches a service, so this gives a complete
+    picture of what is carrying traffic without requiring app-id. It will not
+    break out individual applications within a broad service like 'internet' —
+    use get_application_series for that (requires app-id with http/https mode).
 
     Args:
         router: Router name (required).
@@ -1572,10 +1583,16 @@ async def get_application_series(
     application: str | None = None,
     summarize: bool = True,
 ) -> str:
-    """Get application usage data for a router node — which applications are
-    active, by which clients, and over which WAN path types (PUBLIC/INTER_ROUTER).
+    """Get per-application traffic data for a router node — which applications
+    (YouTube, Zoom, Teams, etc.) are active, by which clients, and over which
+    WAN path types (PUBLIC/INTER_ROUTER).
 
     Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
+    Use this when list_services shows a broad service like 'internet' carrying
+    significant traffic and you need to know which specific applications are
+    responsible. list_services answers "what services?" — this answers "what
+    apps within those services?"
 
     The raw API is extremely verbose (per-client, per-nexthop stats across
     multiple time buckets). Use summarize=True (default) for a clean
