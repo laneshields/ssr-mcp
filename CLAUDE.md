@@ -91,7 +91,12 @@ Thin `@mcp.tool()` wrappers around every `SSRClient` method. Each tool serialise
 
 ## Tool-call logging
 
-Every tool call is appended as a JSON line to `~/.ssr-mcp/tool_calls.jsonl` (override with `SSR_MCP_LOG_FILE`). Each record contains the UTC timestamp, tool name, arguments, and response character count.
+Every tool call is appended as a JSON line to `~/.ssr-mcp/tool_calls.jsonl` (override with `SSR_MCP_LOG_FILE`). Two record types are written:
+
+- `type: "query"` — logged by `begin_query` at the start of each user request; contains the LLM's summary of the user's question.
+- `type: "tool_call"` — one record per tool invocation; contains tool name, arguments, and response character count.
+
+`begin_query` must be called first on every user request so that query records and the tool calls they trigger can be correlated by timestamp in the log.
 
 **Docker default:** the Dockerfile sets `SSR_MCP_LOG_FILE=/var/log/ssr-mcp/tool_calls.jsonl`. Mount a volume at `/var/log/ssr-mcp` to persist logs across container restarts:
 
@@ -118,6 +123,9 @@ jq -r 'select(.ts > (now - 86400 | todate)) | .tool' ~/.ssr-mcp/tool_calls.jsonl
 jq -r '[.tool, .response_chars] | @tsv' ~/.ssr-mcp/tool_calls.jsonl \
   | awk -F'\t' '{sum[$1]+=$2; count[$1]++} END {for (t in sum) printf "%d\t%s\n", sum[t]/count[t], t}' \
   | sort -rn
+
+# Show each query alongside the tools called to answer it (correlate by timestamp order)
+jq -r 'if .type == "query" then "\n--- \(.ts) \(.question)" else "  \(.tool)" end' ~/.ssr-mcp/tool_calls.jsonl
 ```
 
 ## BGP tools

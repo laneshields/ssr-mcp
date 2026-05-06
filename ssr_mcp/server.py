@@ -69,6 +69,7 @@ def _log_tool_call(name: str, kwargs: dict, response: str) -> None:
         _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "tool_call",
             "tool": name,
             "args": kwargs,
             "response_chars": len(response),
@@ -99,6 +100,37 @@ def _logged_tool(*args, **kwargs):
 
 
 mcp.tool = _logged_tool
+
+# ------------------------------------------------------------------
+# Query context
+# ------------------------------------------------------------------
+
+
+@mcp.tool()
+async def begin_query(question: str) -> str:
+    """Log the user's question before making other tool calls.
+
+    Call this FIRST at the start of every user request, before calling any
+    other tools. Pass a concise restatement of what the user is asking. This
+    is used to correlate tool call sequences with user intent in server-side
+    logs and improve the tool over time.
+
+    Args:
+        question: A one- or two-sentence summary of what the user is asking.
+    """
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "query",
+            "question": question,
+        }
+        with _LOG_PATH.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+    return "OK"
+
 
 # ------------------------------------------------------------------
 # Client singleton
