@@ -126,6 +126,76 @@ BGP data comes from the FRR-backed JSON REST endpoints under `/api/v1/router/{ro
 
 All BGP tools accept `router`, `vrf` (default `"default"`), and `address_family` (default `"ipv4"` or `"all"` depending on tool) parameters.
 
+## Session startup for router-specific work
+
+When working with a specific router, call `get_router_info` first. It returns the
+node names needed by most router-targeted tools, the software version, and whether
+application identification is enabled and which modes are active (`has_module`,
+`has_http_https`). This avoids repeated discovery calls during the session.
+
+`get_router_health` is separate — use it for triage ("is this router healthy?"),
+not as a session initializer. Node names from `get_router_info` are required by
+most tools; do not guess them.
+
+## SSR traffic flow
+
+Understanding how packets are processed helps interpret tool output correctly.
+
+**Non-SVR traffic (standard forwarding):**
+
+1. **Tenant classification** — on ingress, the source IP and ingress interface are
+   matched against tenant membership rules (`list_tenant_members`) to assign a tenant.
+
+2. **FIB lookup** — the tenant, destination IP, port, and protocol are looked up in
+   the FIB. There is either 0 or 1 match.
+   - **No match (FIB miss):** the SSR sends an ICMP network unreachable reply. The
+     packet is silently dropped and **does not appear in `get_dropped_packets`**.
+     `fib_lookup` returning no result confirms a FIB miss. Root cause is typically
+     a missing service or incorrect tenant configuration.
+   - **Match:** the entry identifies the service and provides 0 or more next-hops.
+
+3. **Next-hop check:**
+   - **0 next-hops:** traffic cannot be forwarded. **Appears in `get_dropped_packets`.**
+   - **1+ next-hops:** packet is sent to the service area for session processing.
+
+4. **Service area processing** — the session is established or fails. Failures
+   **appear in `get_dropped_packets`**.
+
+5. **Session established but traffic still fails** — if `get_dropped_packets` is
+   empty and `fib_lookup` shows a valid match with next-hops but traffic is broken,
+   the problem may be outside the SSR. Check `list_service_paths` and
+   `list_peer_paths`; if those are healthy the fault is likely external.
+
+## Connectivity troubleshooting
+
+**Decision tree:**
+
+- No specifics on source/destination → `get_dropped_packets` unfiltered
+- Service area CPU high with no explanation → `get_dropped_packets` (flood of unmatched traffic)
+- Have source + destination details → `fib_lookup`
+  - No result → FIB miss → tenant or service config problem (not in dropped packets)
+  - Result, 0 next-hops → `get_dropped_packets` to confirm + check service/path config
+  - Result, 1+ next-hops → `get_sessions` to confirm session; if session exists check `list_service_paths` / `list_peer_paths`
+- `get_dropped_packets` empty + valid FIB match + sessions establishing + traffic still broken → problem likely outside SSR
+
+**Resolving a vague source:**
+
+- Hostname/device description → `get_dhcp_leases` (by hostname) or `get_arp`
+- Physical interface name → `get_device_interfaces`; if single network interface on it, use that name directly
+- Network interface name → match directly in `get_network_interfaces`
+- Source IP, directly connected → match subnet against ethernet-type interfaces in `get_network_interfaces`
+- Source IP, off-network → `get_rib` LPM → next-hop `interfaceName` is a giid (e.g. `g12`) → match number against `globalId` in `get_network_interfaces`
+
+**Resolving a vague destination:**
+
+- Named service ("internet", "corporate-vpn") → `list_services` then `list_service_paths`
+- Application name ("Teams", "Zoom"):
+  - `has_http_https` enabled → `get_app_id_cache` (address cache, `summarize=False`) filtered by application name → dest IP/port/protocol → `fib_lookup`
+  - Completely broken (cache may be empty) → `get_dropped_packets`
+  - App-id not enabled → ask user for IP/port
+- Domain name → `app_id_lookup` domain mode (requires `has_http_https`)
+- All else fails → `get_dropped_packets`
+
 ## Adding a new tool
 
 1. Add a method to `SSRClient` in `client.py`.
