@@ -865,6 +865,9 @@ async def get_fib(
     """Get the Forwarding Information Base (FIB) for a node — the resolved
     set of prefixes and next-hops the dataplane will actually use.
 
+    WARNING: Unfiltered calls may return thousands of entries. Use ip_prefix
+    or vrf to narrow results, or pass a limit.
+
     Args:
         router:    Router name (required).
         node:      Node name within that router (required).
@@ -1073,6 +1076,11 @@ async def get_app_id_cache(
     router, along with the resolved application, category, and domain/URL.
 
     Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
+    WARNING: On an active router the cache can contain tens of thousands of
+    entries. Use summarize=True for broad questions, or keep the default limit
+    and pair summarize=False with a specific known application. Only pass
+    limit=0 (no limit) when you explicitly need the full raw cache.
 
     Use summarize=True (the default for broad questions like "what apps are in
     use?") to get a ranked count by application and category instead of raw
@@ -1483,6 +1491,11 @@ async def get_dropped_packets(
 @mcp.tool()
 async def get_running_config(router: str | None = None) -> str:
     """Fetch the running configuration.
+
+    WARNING: Without a router filter this returns the full authority
+    configuration, which can be very large on conductors managing many
+    routers. Pass router to limit the response to a single router's config
+    subtree whenever you only need one router's configuration.
 
     Context: any — without router, returns the full authority config (conductor)
              or the local device config (standalone router). With router,
