@@ -877,6 +877,12 @@ async def fib_lookup(
     The response includes the matched service name. Pass that to
     list_service_paths to check whether the service's paths are up.
 
+    dest_ip, dest_port, and protocol can be sourced from get_app_id_cache
+    address entries when the destination is known by application name rather
+    than IP (e.g. 'Teams', 'Zoom'). If the cache has no entries for the
+    application and all else fails, use get_dropped_packets to watch for
+    relevant failures in the dropped packet stream.
+
     Args:
         router:           Router name (required).
         node:             Node name (required).
@@ -1131,10 +1137,17 @@ async def get_app_id_cache(
     and pair summarize=False with a specific known application. Only pass
     limit=0 (no limit) when you explicitly need the full raw cache.
 
-    Use summarize=True (the default for broad questions like "what apps are in
-    use?") to get a ranked count by application and category instead of raw
-    entries. Use summarize=False only when you need specific IPs, ports, or
-    domains for a known application.
+    Use summarize=True for broad questions ("what apps are in use?") to get a
+    ranked count by application and category instead of raw entries.
+
+    Use summarize=False with cache='address' to find the destination IPs,
+    ports, and protocols associated with a specific application name — filter
+    the results by the application field and feed matching entries into
+    fib_lookup. Note: there is no server-side application filter; filtering
+    happens on the returned entries. This is most useful for transient failures
+    where the application was previously working and cache entries still exist.
+    If connectivity is completely broken and sessions never established, the
+    cache may be empty for that application — use get_dropped_packets instead.
 
     Args:
         router:    Router name (required).
@@ -1339,6 +1352,11 @@ async def list_services(
     picture of what is carrying traffic without requiring app-id. It will not
     break out individual applications within a broad service like 'internet' —
     use get_application_series for that (requires app-id with http/https mode).
+
+    Also use this as the first step when the destination is described by name
+    rather than IP (e.g. "the internet", "corporate VPN", "the file server").
+    Find the most likely matching service name, then pass it to
+    list_service_paths to check whether that service's paths are up.
 
     Args:
         router: Router name (required).
