@@ -236,6 +236,18 @@ class SSRClient:
 
         return entries
 
+    async def get_app_id_config(self, router: str) -> dict | None:
+        """Returns None when the endpoint 404s (app ID not configured on this router)."""
+        try:
+            return await self._get(
+                f"/api/v1/config/running/authority/router/{router}/application-identification",
+                params={"withDefaults": "true"},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
     async def get_web_filtering_state(self, router: str, node: str) -> dict:
         return await self._get(
             f"/api/v1/router/{router}/node/{node}/applications/state"

@@ -230,13 +230,15 @@ async def get_router_health(
     router: str,
     node: str | None = None,
 ) -> str:
-    """Get a concise health summary for a router. Combines alarms, node state,
-    and process status into a single result so you don't need to call three
-    separate tools.
+    """Get a concise health summary for a router: alarms, node status, process
+    state, and resource utilization in a single call.
 
-    Use this as the first call when asked whether a router is healthy, what is
-    wrong with it, or to triage a reported problem. Follow up with more specific
-    tools only if the summary reveals something worth investigating.
+    Use this when asked whether a router is healthy, what is wrong with it,
+    or to triage a reported problem. Follow up with more specific tools only
+    if the summary reveals something worth investigating.
+
+    For static router facts (nodes, software version, app-id capability) use
+    get_router_info instead.
 
     Returns overall_status:
       ONLINE   — all nodes online, no alarms, all processes running
@@ -342,6 +344,71 @@ async def get_router_health(
         },
         indent=2,
     )
+
+
+@mcp.tool()
+async def get_router_info(router: str) -> str:
+    """Get static facts about a router: its nodes, software version, and
+    application identification capability.
+
+    Use this at the start of any session involving a specific router, and
+    always before using application identification tools. The node names
+    returned here are required by most other router-targeted tools.
+
+    Returns:
+      nodes       — list of nodes with name, role, and software version
+      app_id      — whether app-id is enabled and which tool families are
+                    valid (has_module, has_http_https)
+
+    app_id tool families:
+      has_module     — get_app_id_modules, get_application_names,
+                       app_id_lookup (address mode)
+      has_http_https — get_app_id_cache, get_application_series,
+                       get_web_filtering_state, get_app_id_categories,
+                       app_id_lookup (address and domain modes)
+
+    Args:
+        router: Router name (required).
+    """
+    client = get_client()
+
+    state_data, app_id_config = await asyncio.gather(
+        client.get_system_state(router),
+        client.get_app_id_config(router),
+    )
+
+    raw_nodes = (
+        state_data
+        .get("data", {})
+        .get("allRouters", {})
+        .get("nodes", [{}])[0]
+        .get("nodes", {})
+        .get("nodes", [])
+    )
+    nodes = [
+        {
+            "name": n.get("name"),
+            "role": n.get("state", {}).get("role"),
+            "software_version": n.get("state", {}).get("softwareVersion"),
+        }
+        for n in raw_nodes
+    ]
+
+    modes = (app_id_config or {}).get("mode") or []
+    if app_id_config is None:
+        app_id: dict = {"enabled": False, "reason": "not configured (404)"}
+    elif not modes:
+        app_id = {"enabled": False, "reason": "no modes active"}
+    else:
+        has_all = "all" in modes
+        app_id = {
+            "enabled": True,
+            "modes": modes,
+            "has_module": has_all or "module" in modes,
+            "has_http_https": has_all or "http" in modes or "https" in modes,
+        }
+
+    return json.dumps({"nodes": nodes, "app_id": app_id}, indent=2)
 
 
 # ------------------------------------------------------------------
@@ -657,6 +724,8 @@ async def get_app_id_modules(router: str, node: str) -> str:
     """List the application identification modules registered and running
     on a router node.
 
+    Requires: app-id with 'module' mode — check app_id.has_module in get_router_info.
+
     Args:
         router: Router name (required).
         node:   Node name (required).
@@ -674,6 +743,8 @@ async def get_application_names(
     """List named applications with their active session count and number of
     IP tuples resolved for each application name.
 
+    Requires: app-id with 'module' mode — check app_id.has_module in get_router_info.
+
     Args:
         router: Router name (required).
         node:   Node name (required).
@@ -687,6 +758,8 @@ async def get_application_names(
 async def get_web_filtering_state(router: str, node: str) -> str:
     """Get the web filtering enabled/disabled state for a router node.
 
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
     Args:
         router: Router name (required).
         node:   Node name (required).
@@ -698,6 +771,8 @@ async def get_web_filtering_state(router: str, node: str) -> str:
 @mcp.tool()
 async def get_app_id_categories(router: str, node: str) -> str:
     """List the application categories known to the SSR for web filtering.
+
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
 
     Args:
         router: Router name (required).
@@ -720,6 +795,9 @@ async def app_id_lookup(
     """Look up the application classification for a destination. Returns the
     application, category, and domain/URL that app-id would resolve.
 
+    Requires: app-id enabled — check app_id.enabled in get_router_info.
+    Domain mode additionally requires has_http_https.
+
     Two modes:
       'address' — looks up by destination IP, port, and protocol.
                   Requires: ip, port, protocol.
@@ -727,6 +805,7 @@ async def app_id_lookup(
 
       'domain'  — looks up by domain name or URL.
                   Requires: domain.
+                  Requires http or https app-id mode.
                   Examples: domain='www.youtube.com'
                             domain='http://192.168.1.5/index.html'
 
@@ -985,6 +1064,8 @@ async def get_app_id_cache(
     """Get the application identification cache — destination IPs, ports, and
     protocols that have been classified by app-id based on traffic through the
     router, along with the resolved application, category, and domain/URL.
+
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
 
     Use summarize=True (the default for broad questions like "what apps are in
     use?") to get a ranked count by application and category instead of raw
@@ -1493,6 +1574,8 @@ async def get_application_series(
 ) -> str:
     """Get application usage data for a router node — which applications are
     active, by which clients, and over which WAN path types (PUBLIC/INTER_ROUTER).
+
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
 
     The raw API is extremely verbose (per-client, per-nexthop stats across
     multiple time buckets). Use summarize=True (default) for a clean
