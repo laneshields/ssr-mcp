@@ -108,7 +108,13 @@ class SSRClient:
             headers = {"Authorization": f"Bearer {self._token}"}
             response = await self._http.post("/api/v1/graphql", headers=headers, json=payload)
 
-        response.raise_for_status()
+        if response.is_error:
+            body = response.text[:500] if response.text else "(empty)"
+            raise httpx.HTTPStatusError(
+                f"HTTP {response.status_code}: {body}",
+                request=response.request,
+                response=response,
+            )
         return response.json()
 
     # ------------------------------------------------------------------

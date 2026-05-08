@@ -1042,8 +1042,12 @@ async def get_top_sources(
     are carrying traffic use list_services; for which applications are in use
     use get_application_series (requires app-id http/https mode).
 
+    Always pass router when connected to a conductor that manages many routers.
+    Omitting router fans out the query to every managed router, generates a
+    large response, and produces connectivity errors for any offline nodes.
+
     Args:
-        router:   (optional) Limit to a specific router.
+        router:   Router name. Always provide this on a multi-router conductor.
         node:     (optional) Limit to a specific node.
         limit:    Number of top sources to return. Default 10.
         order_by: Metric to rank by. Known values: 'TOTAL_DATA',
