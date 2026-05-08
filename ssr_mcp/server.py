@@ -1050,8 +1050,8 @@ async def get_top_sources(
         router:   Router name. Always provide this on a multi-router conductor.
         node:     (optional) Limit to a specific node.
         limit:    Number of top sources to return. Default 10.
-        order_by: Metric to rank by. Known values: 'TOTAL_DATA',
-                  'CURRENT_BANDWIDTH', 'SESSION_COUNT'. Default 'TOTAL_DATA'.
+        order_by: Metric to rank by. Valid values: 'TOTAL_DATA',
+                  'SESSION_COUNT'. Default 'TOTAL_DATA'.
     """
     data = await get_client().get_top_sources(router, node, limit, order_by)
     return json.dumps(data, indent=2)
