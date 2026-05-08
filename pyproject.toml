@@ -19,3 +19,8 @@ ssr-mcp = "ssr_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ssr_mcp"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.12",
+]
