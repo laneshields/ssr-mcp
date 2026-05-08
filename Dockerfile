@@ -3,7 +3,7 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 WORKDIR /app
 
 # Install dependencies into the project virtualenv (cached layer)
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock LICENSE ./
 RUN uv sync --frozen --no-install-project
 
 # Copy source and install the project itself
