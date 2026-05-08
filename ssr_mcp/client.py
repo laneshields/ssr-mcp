@@ -2159,14 +2159,12 @@ class SSRClient:
         )
 
         svr_ips: set[str] = set()
-        for rtr_node in (
-            services_data.get("data", {}).get("allRouters", {}).get("nodes", [])
-        ):
-            for node in rtr_node.get("nodes", {}).get("nodes", []):
-                for svc in node.get("serviceInfo", []):
+        for rtr_node in (services_data.get("data", {}).get("allRouters", {}).get("nodes") or []):
+            for node in (rtr_node.get("nodes") or {}).get("nodes") or []:
+                for svc in node.get("serviceInfo") or []:
                     if not svc.get("serviceName", "").startswith("_bgp_"):
                         continue
-                    for prefix in svc.get("prefixes", []):
+                    for prefix in svc.get("prefixes") or []:
                         if isinstance(prefix, str) and prefix.endswith("/32"):
                             svr_ips.add(prefix[:-3])
 
