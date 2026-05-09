@@ -2173,6 +2173,17 @@ class SSRClient:
         return result
 
     # ------------------------------------------------------------------
+    # IDP
+    # ------------------------------------------------------------------
+
+    async def get_idp_status(self, router: str, node: str) -> dict:
+        engine_data, pod_data = await asyncio.gather(
+            self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state"),
+            self._get(f"/api/v1/router/{router}/node/{node}/pods/csrx"),
+        )
+        return {"engine": engine_data, "pod": pod_data}
+
+    # ------------------------------------------------------------------
     # Ping
     # ------------------------------------------------------------------
 

@@ -2126,6 +2126,34 @@ async def get_bgp_neighbors(
 
 
 @mcp.tool()
+async def get_idp_status(router: str, node: str) -> str:
+    """Get IDP (Intrusion Detection and Prevention) status for a router node.
+
+    Combines the IDP engine state and cSRX container health into a single call.
+
+    When idpTopology is 'disabled' the node has no IDP configuration — no
+    further analysis is needed. When enabled, the response reports:
+      - engine.current: 'on' when the IDP engine is running
+      - engine.securityPackages: threat signature version, accessibility,
+        and last/next update timestamps
+      - networks: IDP internal network reachability (all should be pingable)
+      - pod.podState / pod.dockerState: cSRX container state ('active'/'running'
+        when healthy, 'unconfigured' when IDP is not enabled)
+
+    Note: the API spells 'accessible' as 'accesible' (one 's') in the
+    securityPackages object — this is a known typo in the SSR API.
+
+    Context: router
+
+    Args:
+        router: Router name (required).
+        node:   Node name (required).
+    """
+    data = await get_client().get_idp_status(router, node)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
 async def ping(
     router: str,
     node: str,
