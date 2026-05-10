@@ -181,6 +181,86 @@ async def begin_query(question: str) -> str:
     return "OK"
 
 
+@mcp.tool()
+async def report_issue(
+    tool: str,
+    observation: str,
+    data: str | None = None,
+) -> str:
+    """Report a suspected bug or data anomaly encountered during a tool call.
+
+    Call this whenever a tool result looks wrong or inconsistent — for example,
+    a summary returning "unknown" for fields that should have values, a result
+    that contradicts another tool's output, or a response shape that doesn't
+    match the documented format.
+
+    Reports are written to the same log file as tool calls and query records so
+    they can be correlated with the session that triggered them.
+
+    Args:
+        tool:        Name of the tool that returned the suspicious result.
+        observation: Concise description of what was unexpected and why.
+        data:        Optional snippet of the suspicious result (JSON string or
+                     short excerpt) to attach for context.
+    """
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record: dict = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "issue",
+            "tool": tool,
+            "observation": observation,
+        }
+        if data is not None:
+            record["data"] = data
+        with _LOG_PATH.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+    return "Issue logged. Thank you — this helps improve the tools."
+
+
+@mcp.tool()
+async def report_feedback(
+    complaint: str,
+    what_went_wrong: str,
+    context: str,
+) -> str:
+    """Log user dissatisfaction with a result during a troubleshooting session.
+
+    Call this when the user indicates the answer or analysis was wrong,
+    incomplete, or unhelpful — for example: "that's not right", "you missed X",
+    "I expected Y", "that doesn't make sense". Do not wait for the user to ask
+    you to log it; call it proactively as soon as dissatisfaction is clear.
+
+    Args:
+        complaint:      What the user said or expressed, quoted or closely
+                        paraphrased.
+        what_went_wrong: Your honest self-assessment of the error — which step
+                         failed, what assumption was wrong, or what you should
+                         have done differently.
+        context:        A brief summary of the interaction at the point of
+                        complaint: which tools were called, what they returned,
+                        and what you reported to the user. Include key values
+                        (router name, tool names, result snippets) so the record
+                        is useful without replaying the full conversation.
+    """
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "feedback",
+            "complaint": complaint,
+            "what_went_wrong": what_went_wrong,
+            "context": context,
+        }
+        with _LOG_PATH.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+    return "Feedback logged. Thank you — this helps improve the tools."
+
+
 # ------------------------------------------------------------------
 # Client singleton
 # ------------------------------------------------------------------
@@ -2468,6 +2548,15 @@ def troubleshoot_traffic(
 Call `begin_query` with a one-sentence description of what the user asked (e.g.
 "Why can't the user at 10.1.2.3 reach Teams?" or "Internet traffic broken on router X").
 
+Throughout this workflow: if any tool returns a result that looks wrong or inconsistent
+— a field that should have a value returning empty or `"unknown"`, a response shape
+that doesn't match the documented format, or data that contradicts another tool's
+output — call `report_issue` to log it before continuing. If the user expresses
+dissatisfaction with any result or analysis ("that's not right", "you missed X",
+"I expected Y"), call `report_feedback` immediately with their complaint, your
+self-assessment of what went wrong, and a brief summary of what tools were called
+and what they returned at that point.
+
 ## Step 2 — Establish context
 
 Call `get_connection_info`. Note the mode, router name, and node name.
@@ -2644,6 +2733,15 @@ def health_check(router: str | None = None) -> str:
 
 Call `begin_query` with a one-sentence description of what the user asked (e.g.
 "Health check of the full SSR deployment" or "Health check for router X").
+
+Throughout this workflow: if any tool returns a result that looks wrong or inconsistent
+— a field that should have a value returning empty or `"unknown"`, a response shape
+that doesn't match the documented format, or data that contradicts another tool's
+output — call `report_issue` to log it before continuing. If the user expresses
+dissatisfaction with any result or analysis ("that's not right", "you missed X",
+"I expected Y"), call `report_feedback` immediately with their complaint, your
+self-assessment of what went wrong, and a brief summary of what tools were called
+and what they returned at that point.
 
 ## Step 2 — Establish context
 
