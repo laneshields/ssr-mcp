@@ -35,7 +35,24 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 from ssr_mcp.client import SSRClient
+import ssr_mcp.server as _server
 from ssr_mcp.server import _extract_dhcp_leases, _parse_node_utilization
+from contextlib import contextmanager
+
+
+@contextmanager
+def _inject_client(client: SSRClient):
+    """Temporarily set the server module's client singleton to our test client.
+
+    Lets us call server-level composite tools (get_router_health, etc.) that
+    use get_client() internally, without re-instantiating from env vars.
+    """
+    old = _server._client
+    _server._client = client
+    try:
+        yield
+    finally:
+        _server._client = old
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +266,9 @@ async def test_get_router(c: SSRClient, ctx: TestContext):
 
 @register()
 async def test_get_router_health(c: SSRClient, ctx: TestContext):
-    r = await c.get_router_health(ctx.router)
-    assert r
+    with _inject_client(c):
+        result = json.loads(await _server.get_router_health(router=ctx.router, node=ctx.node))
+    assert "overall_status" in result
 
 # ---------------------------------------------------------------------------
 # Tests — system state
@@ -348,8 +366,25 @@ async def test_get_fib(c: SSRClient, ctx: TestContext):
 
 @register()
 async def test_fib_lookup(c: SSRClient, ctx: TestContext):
-    # 8.8.8.8:53/UDP is a reasonable probe; a FIB miss (empty result) is valid
-    r = await c.fib_lookup(ctx.router, ctx.node, dest_ip="8.8.8.8", dest_port=53, protocol="udp")
+    # FIB lookup requires tenant or source context — derive parameters from a real session.
+    sessions = await c.get_sessions(ctx.router, ctx.node, limit=10)
+    target = next(
+        (s for s in sessions if s.get("tenant") and s.get("destIp") and s.get("destPort") and s.get("protocol")),
+        None,
+    )
+    if target is None:
+        raise _SkipTest("no active sessions with full flow details for FIB lookup")
+    # Protocol from sessions may come as a name ("UDP") or numeric string ("17").
+    proto_str = str(target["protocol"]).lower()
+    proto_map = {"6": "tcp", "17": "udp", "1": "icmp", "58": "icmpv6"}
+    protocol = proto_map.get(proto_str, proto_str)
+    r = await c.fib_lookup(
+        ctx.router, ctx.node,
+        dest_ip=target["destIp"],
+        dest_port=int(target["destPort"]),
+        protocol=protocol,
+        tenant=target["tenant"],
+    )
     assert isinstance(r, (list, dict))
 
 @register()
@@ -401,8 +436,9 @@ async def test_get_session(c: SSRClient, ctx: TestContext):
 
 @register()
 async def test_get_dropped_packets(c: SSRClient, ctx: TestContext):
-    r = await c.get_dropped_packets(ctx.router, ctx.node, duration=5)
-    assert "total_dropped" in r
+    with _inject_client(c):
+        result = json.loads(await _server.get_dropped_packets(router=ctx.router, node=ctx.node, duration=5))
+    assert "total_dropped" in result
 
 @register()
 async def test_get_top_sources(c: SSRClient, ctx: TestContext):
