@@ -551,7 +551,7 @@ def _extract_dhcp_leases(data: dict) -> list[dict]:
     for router_node in data.get("data", {}).get("allRouters", {}).get("nodes", []):
         for node in router_node.get("nodes", {}).get("nodes", []):
             for dev_iface in node.get("deviceInterfaces", {}).get("nodes", []):
-                for net_iface in dev_iface.get("networkInterfaces", {}).get("nodes", []):
+                for net_iface in (dev_iface.get("networkInterfaces") or {}).get("nodes") or []:
                     plugin_state = (net_iface.get("plugins") or {}).get("state") or {}
                     dhcp_server = plugin_state.get("dhcp-server")
                     if not dhcp_server:
