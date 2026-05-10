@@ -106,8 +106,12 @@ Async httpx client targeting the SSR REST and GraphQL APIs. Handles JWT authenti
 
 Accepts `port: int = 443` in `__init__`; base URL is `https://{host}:{port}`.
 
-**`ssr_mcp/server.py` — FastMCP tool definitions**
+**`ssr_mcp/server.py` — FastMCP tool and prompt definitions**
 Thin `@mcp.tool()` wrappers around every `SSRClient` method. Each tool serialises the result to JSON and returns it as a string. The client singleton is created lazily via `get_client()` on first tool call so the server starts cleanly even without `.env` credentials. Tool docstrings double as the MCP tool descriptions seen by Claude — keep them accurate and include all `Args:` entries.
+
+`@mcp.prompt()` definitions provide guided multi-step workflows. Each prompt returns a markdown instruction string that tells the model which tools to call, in what order, and how to interpret and present results. Current prompts:
+
+- `health_check(router=None)` — conductor-wide triage (parallel gather → summary table → offer to drill) or single-router deep dive (software state, connectivity, resources, IDP). Pass a router name to skip straight to the deep dive.
 
 `load_dotenv` is called with the explicit path `Path(__file__).parent.parent / ".env"` and `override=True` so the repo's `.env` always takes precedence over any env vars injected by the MCP host.
 
