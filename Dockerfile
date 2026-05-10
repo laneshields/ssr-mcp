@@ -15,7 +15,9 @@ RUN useradd -r -s /sbin/nologin app \
     && chown -R app:app /app \
     && mkdir -p /var/log/ssr-mcp \
     && chown app:app /var/log/ssr-mcp
-USER app
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
@@ -31,4 +33,5 @@ ENV SSR_MCP_TRANSPORT=streamable-http \
     SSR_MCP_PORT=8000 \
     SSR_MCP_LOG_FILE=/var/log/ssr-mcp/tool_calls.jsonl
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD [".venv/bin/ssr-mcp"]
