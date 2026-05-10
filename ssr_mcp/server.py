@@ -1640,11 +1640,13 @@ async def get_dropped_packets(
         iface = event.get("ingressInterface", "unknown")
         by_interface[iface] = by_interface.get(iface, 0) + 1
 
-        src = event.get("sourceIp") or event.get("sourceAddress") or "unknown"
+        src_obj = event.get("source") or {}
+        src = src_obj.get("address") or event.get("sourceIp") or event.get("sourceAddress") or "unknown"
         by_source_ip[src] = by_source_ip.get(src, 0) + 1
 
-        dst_ip = event.get("destIp") or event.get("destinationIp") or "unknown"
-        dst_port = event.get("destPort") or event.get("destinationPort")
+        dst_obj = event.get("destination") or {}
+        dst_ip = dst_obj.get("address") or event.get("destIp") or event.get("destinationIp") or "unknown"
+        dst_port = dst_obj.get("port") or event.get("destPort") or event.get("destinationPort")
         dest_key = f"{dst_ip}:{dst_port}" if dst_port else dst_ip
         by_dest[dest_key] = by_dest.get(dest_key, 0) + 1
 
@@ -2387,6 +2389,229 @@ async def ping(
 # ------------------------------------------------------------------
 # Prompts
 # ------------------------------------------------------------------
+
+
+@mcp.prompt()
+def troubleshoot_traffic(
+    router: str | None = None,
+    source: str | None = None,
+    destination: str | None = None,
+) -> str:
+    """Guided traffic troubleshooting for a specific router.
+
+    Provide as much detail as you have — all parameters are optional.
+
+    Args:
+        router: Router name. In conductor mode, required; in router mode, defaults
+            to the connected router.
+        source: Where traffic originates — IP address, hostname, device description,
+            physical interface name, or network interface name.
+        destination: Where traffic is headed — IP address, service name
+            ("internet", "corporate-vpn"), application name ("Teams", "Zoom"),
+            or domain name.
+    """
+    parts = []
+    if router:
+        parts.append(f"router `{router}`")
+    if source:
+        parts.append(f"source `{source}`")
+    if destination:
+        parts.append(f"destination `{destination}`")
+    scope_desc = ", ".join(parts) if parts else "this SSR deployment"
+    intro = f"Troubleshoot a traffic problem on {scope_desc}."
+
+    router_step = (
+        f"The target router is `{router}`. Skip straight to `get_router_info` for it."
+        if router
+        else (
+            "- **conductor mode** → ask the user which router to investigate if not "
+            "already clear from context.\n"
+            "- **router mode** → use the router and node from `get_connection_info`."
+        )
+    )
+
+    source_hint = (
+        f"\n\nThe user identified the source as `{source}`. Use Step 4 to resolve "
+        "it to a concrete IP and network interface name before calling `fib_lookup`."
+        if source
+        else ""
+    )
+
+    destination_hint = (
+        f"\n\nThe user identified the destination as `{destination}`. Use Step 5 to "
+        "resolve it to a concrete IP, port, and protocol (or service name) before "
+        "calling `fib_lookup`."
+        if destination
+        else ""
+    )
+
+    have_details = source or destination
+
+    triage_branch = (
+        (
+            "You have source and/or destination details. Proceed to Step 4 to resolve "
+            "them, then Step 6 (FIB lookup)."
+        )
+        if have_details
+        else (
+            "No source or destination details are available. Call `get_dropped_packets` "
+            "(unfiltered, router + node) with the default duration, then go to Step 3b "
+            "before proceeding to Step 7."
+        )
+    )
+
+    return f"""{intro}
+{source_hint}{destination_hint}
+
+## Step 1 — Log the query
+
+Call `begin_query` with a one-sentence description of what the user asked (e.g.
+"Why can't the user at 10.1.2.3 reach Teams?" or "Internet traffic broken on router X").
+
+## Step 2 — Establish context
+
+Call `get_connection_info`. Note the mode, router name, and node name.
+
+{router_step}
+
+Call `get_router_info` for the target router. Record:
+- Node name(s) — required by most tools.
+- `has_module` and `has_http_https` — determines which app-id tools are available.
+
+## Step 3 — Initial triage branch
+
+{triage_branch}
+
+## Step 3b — Interpret dropped-packet result
+
+After any `get_dropped_packets` call (Branch A or Step 6):
+
+**If total_dropped is 0 or very low (< 5):**
+Tell the user you collected few or no drops and ask whether to try again with a longer
+duration (e.g. 30 seconds). Wait for their answer before continuing.
+
+**If `top_source_ips` or `top_destinations` contains `"unknown"`:**
+Call `get_dropped_packets` again with `raw=True` (same filters, same duration) to
+retrieve the individual events and read the actual IP addresses from the `source.address`
+and `destination.address` fields in each event. Use those IPs for all further analysis.
+
+## Step 4 — Resolve source to IP + network interface
+
+Skip this step if you already have a concrete source IP and know which network
+interface it enters on.
+
+Match the user-provided source description using the first rule that applies:
+
+| Source description | Resolution |
+|--------------------|------------|
+| Hostname or device name | `get_dhcp_leases` (filter by hostname), or `get_arp` |
+| Physical interface name (e.g. `eth0`, `xe-0/0/1`) | `get_device_interfaces` → find the network interface bound to it |
+| Network interface name (e.g. `LAN`, `WAN`) | `get_network_interfaces` — match directly |
+| IP address, likely directly connected | `get_network_interfaces` — match source subnet against ethernet-type interfaces |
+| IP address, off-network (routed) | `get_rib` LPM lookup → next-hop `interfaceName` is a giid (e.g. `g12`) → match number against `globalId` in `get_network_interfaces` |
+| Unknown | Ask the user for the source IP or interface before continuing |
+
+Once resolved, note the **source IP** and **network interface name** for the FIB lookup.
+
+## Step 5 — Resolve destination to IP/port/protocol or service name
+
+Skip this step if you already have a concrete destination IP, port, and protocol.
+
+Match the user-provided destination description using the first rule that applies:
+
+| Destination description | Resolution |
+|-------------------------|------------|
+| Named service (e.g. "internet", "corporate-vpn") | `list_services` to confirm the service name, then `list_service_paths` to check path health; also do FIB lookup if you have source details |
+| Application name (e.g. "Teams", "Zoom") and `has_http_https` is true | `get_app_id_cache` (summarize=False) filtered client-side by application name → extract dest IP, port, protocol for FIB lookup; if cache is empty fall back to `get_dropped_packets` filtered by the known source IP |
+| Application name and `has_http_https` is false | App-id not active — ask user for destination IP and port |
+| Domain name and `has_http_https` is true | `app_id_lookup` in domain mode |
+| Domain name and `has_http_https` is false | Ask user for destination IP and port |
+| IP address | Use directly |
+| Unknown | Fall back: call `get_dropped_packets` (filtered by source IP if known) and skip the FIB lookup — go straight to Step 7 |
+
+Once resolved, note the **destination IP**, **port**, and **protocol** for the FIB lookup.
+
+## Step 6 — FIB lookup and session check
+
+### 6a — FIB lookup
+
+Call `fib_lookup` with:
+- `router` and `node` from Step 2.
+- `destination_ip` from Step 5.
+- `tenant` if known; otherwise `source_ip` + `source_interface` from Step 4 (preferred
+  when tenant is unknown — SSR will derive the tenant).
+- `port` and `protocol` if known.
+
+**Branch on result:**
+
+#### No FIB result (FIB miss)
+
+The SSR has no route for this traffic. It sends an ICMP network unreachable reply.
+**FIB misses do not appear in `get_dropped_packets`** — do not call it here.
+
+Likely causes: missing service definition, incorrect tenant membership, or the source
+IP is not classified into the expected tenant. Check `list_tenant_members` for the
+resolved tenant (or ask the user which tenant should apply) and `list_services` to
+confirm the service exists and covers the destination.
+
+Skip to Step 7.
+
+#### FIB result with 0 next-hops
+
+A matching service exists but has no viable paths. The SSR will drop packets.
+Call `get_dropped_packets` (router + node, filtered by source IP if known) to
+confirm active drops.
+
+Also call `list_service_paths` for the matched service and `list_peer_paths` (router)
+to identify which paths are down and why.
+
+Skip to Step 7.
+
+#### FIB result with 1+ next-hops
+
+The FIB entry is healthy. Call `get_sessions` (router + node, filtered by source IP
+and/or destination IP) to check whether sessions are actually establishing.
+
+**If sessions are present and active:** The SSR is forwarding traffic. Call
+`list_service_paths` and `list_peer_paths` (router) to verify path health. If those
+are healthy too, the problem is likely outside the SSR (upstream/downstream device,
+firewall, server). Report this clearly.
+
+**If no sessions are found:** Traffic may not be reaching the router, or sessions are
+being established and torn down immediately. Call `get_dropped_packets` (router + node,
+filtered by source IP if known) to check for active drops in the service area.
+
+## Step 7 — Report
+
+Open with a one-sentence verdict stating where the problem lies (or confirming no
+SSR-side problem was found).
+
+Then report findings section by section. Omit sections where nothing was found.
+
+### Dropped Packets
+List drop reasons and counts. Group by reason code. Flag high-volume drops prominently.
+Report actual source and destination IPs if available (from raw events). If addresses
+still show as `unknown` after a raw call, note that the SSR did not capture them for
+this traffic type.
+
+### FIB Lookup
+State the result: miss, 0 next-hops, or match with N next-hops. Include the matched
+service name and tenant if present.
+
+### Service / Peer Paths
+For each unhealthy path: name, state, and the reported reason.
+
+### Sessions
+Whether active sessions were found. If found, include session count and any notable
+state (e.g. sessions present but peer paths degraded).
+
+### Conclusion
+- If a root cause was found: state it clearly and suggest the likely config fix
+  (missing service, bad tenant, down peer path, etc.).
+- If no SSR-side cause was found: state explicitly that the SSR is forwarding traffic
+  correctly and the fault is likely external.
+- Offer to dig deeper into any specific area the user wants to explore.
+"""
 
 
 @mcp.prompt()
