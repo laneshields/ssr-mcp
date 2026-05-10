@@ -16,7 +16,29 @@ uv run python -m ssr_mcp.server
 
 # Inspect available tools via MCP dev UI
 uv run mcp dev ssr_mcp/server.py
+
+# Validate all tools against a live SSR instance
+uv run python tests/validate_tools.py
 ```
+
+## Validation script
+
+`tests/validate_tools.py` runs every SSRClient method directly against a real SSR
+instance — no MCP host required. It reads credentials from `.env` and auto-discovers
+the connection mode, SSR software versions, and enabled features (app-id, IDP) before
+running tests. Tests that don't apply to the current setup (conductor-only tools on a
+direct router connection, app-id tools when app-id is disabled, etc.) are skipped
+rather than failed.
+
+Set `SSR_TEST_ROUTER` in `.env` to pin a specific managed router for conductor-mode
+tests. If unset, the script discovers connected managed routers and prompts for a
+selection with a suggested default.
+
+When tests fail, the script prints a JSON block containing the full test context
+(connection mode, conductor version, router version, feature flags) alongside each
+error. **Always include this block when asking Claude Code to investigate or fix a
+failure** — it prevents version-specific assumptions and ensures fixes are valid
+across conductor, managed-router, and cloud-managed deployments.
 
 ## Configuration
 
