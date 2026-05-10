@@ -2201,16 +2201,16 @@ class SSRClient:
             pod_data = await self._get(f"/api/v1/router/{router}/node/{node}/pods/csrx")
             return {"engine": engine_data, "pod": pod_data}
 
-        pod_data, monitoring_data, idp_data = await asyncio.gather(
-            self._get(f"/api/v1/router/{router}/node/{node}/pods/csrx"),
-            self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state/monitoring"),
-            self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state/idp"),
-            return_exceptions=True,
-        )
         result: dict = {"engine": engine_data}
-        result["pod"] = pod_data if not isinstance(pod_data, Exception) else {"error": str(pod_data)}
-        result["monitoring"] = monitoring_data if not isinstance(monitoring_data, Exception) else {"error": str(monitoring_data)}
-        result["idp"] = idp_data if not isinstance(idp_data, Exception) else {"error": str(idp_data)}
+        for key, path in [
+            ("pod", f"/api/v1/router/{router}/node/{node}/pods/csrx"),
+            ("monitoring", f"/api/v1/router/{router}/node/{node}/cadillac/state/monitoring"),
+            ("idp", f"/api/v1/router/{router}/node/{node}/cadillac/state/idp"),
+        ]:
+            try:
+                result[key] = await self._get(path)
+            except Exception as e:
+                result[key] = {"error": str(e)}
         return result
 
     # ------------------------------------------------------------------
