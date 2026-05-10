@@ -656,6 +656,15 @@ async def test_get_mist_info(c: SSRClient, ctx: TestContext):
     for sensitive in ("SSH", "Artifactory", "root_password"):
         assert sensitive not in cloud, f"sensitive key '{sensitive}' present in get_mist_info output"
 
+@register(requires=["has_idp"])
+async def test_get_security_events(c: SSRClient, ctx: TestContext):
+    r = await c.get_security_events(ctx.router, ctx.node, limit=10)
+    assert isinstance(r, list)
+    if r:
+        assert "data" in r[0]
+        assert "attack" in r[0]["data"]
+        assert "threat_severity" in r[0]["data"]
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
