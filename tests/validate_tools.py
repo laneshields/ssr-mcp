@@ -7,6 +7,7 @@ No MCP host required. Reads credentials from .env in the repo root.
 
 Usage:
     uv run python tests/validate_tools.py
+    uv run python tests/validate_tools.py --env-file .env.mist-managed
 
 Set SSR_TEST_ROUTER in .env to pin a managed router for conductor-mode tests
 and skip the interactive prompt. If unset, the script discovers connected
@@ -20,6 +21,7 @@ this block in bug reports or when asking Claude Code to investigate a fix — th
 context prevents version-specific assumptions.
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -32,12 +34,20 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / ".env", override=True)
+
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--env-file", default=None)
+_args, _ = _parser.parse_known_args()
+_env_path = Path(_args.env_file) if _args.env_file else Path(__file__).parent.parent / ".env"
+load_dotenv(_env_path, override=True)
 
 from ssr_mcp.client import SSRClient
 import ssr_mcp.server as _server
 from ssr_mcp.server import _extract_dhcp_leases, _parse_node_utilization
 from contextlib import contextmanager
+
+# server.py also calls load_dotenv at import time; re-apply to ensure --env-file wins.
+load_dotenv(_env_path, override=True)
 
 
 @contextmanager
@@ -625,6 +635,26 @@ async def test_get_application_series(c: SSRClient, ctx: TestContext):
 async def test_get_idp_status(c: SSRClient, ctx: TestContext):
     r = await c.get_idp_status(ctx.router, ctx.node)
     assert "engine" in r
+
+# ---------------------------------------------------------------------------
+# Tests — Mist / cloud-managed
+# ---------------------------------------------------------------------------
+
+@register(modes=["router-cloud"])
+async def test_get_connection_info_display_name(c: SSRClient, ctx: TestContext):
+    r = await c.get_connection_info()
+    assert "display_name" in r, "display_name missing from get_connection_info for router-cloud mode"
+    assert r["display_name"], "display_name is empty"
+
+@register(modes=["router-cloud"])
+async def test_get_mist_info(c: SSRClient, ctx: TestContext):
+    r = await c.get_mist_info(ctx.router, ctx.node)
+    assert "Name" in r
+    assert "Connection" in r
+    assert "Config" in r
+    cloud = r.get("Config", {}).get("mist", {}).get("cloud", {})
+    for sensitive in ("SSH", "Artifactory", "root_password"):
+        assert sensitive not in cloud, f"sensitive key '{sensitive}' present in get_mist_info output"
 
 # ---------------------------------------------------------------------------
 # Runner
