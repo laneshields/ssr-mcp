@@ -76,6 +76,8 @@ class SSRClient:
             response = await self._http.get(path, headers=headers, params=params)
 
         response.raise_for_status()
+        if not response.content:
+            return {}
         return response.json()
 
     async def _post(self, path: str, body: dict) -> Any:
