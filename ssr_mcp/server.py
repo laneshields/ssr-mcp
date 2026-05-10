@@ -63,6 +63,54 @@ _LOG_PATH = pathlib.Path(
     os.environ.get("SSR_MCP_LOG_FILE", pathlib.Path.home() / ".ssr-mcp" / "tool_calls.jsonl")
 )
 
+_SESSION_GAP_SECONDS = 30 * 60  # gap after which a new session is assumed
+
+
+def _maybe_log_session_start(tool_name: str) -> None:
+    """Write a synthetic query record if this looks like the start of a new session.
+
+    Fires when any tool other than begin_query is the first call after a gap of
+    at least _SESSION_GAP_SECONDS, so orphaned tool calls are still groupable by
+    session even when the model skips begin_query.
+    """
+    if tool_name == "begin_query":
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        last_ts = None
+
+        if _LOG_PATH.exists():
+            with _LOG_PATH.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                if size > 0:
+                    f.seek(max(0, size - 4096))
+                    tail = f.read().decode("utf-8", errors="replace")
+                    lines = [ln for ln in tail.strip().splitlines() if ln.strip()]
+                    if lines:
+                        try:
+                            last_ts = datetime.fromisoformat(
+                                json.loads(lines[-1])["ts"]
+                            )
+                        except Exception:
+                            pass
+
+        is_new_session = last_ts is None or (
+            now - last_ts
+        ).total_seconds() > _SESSION_GAP_SECONDS
+
+        if is_new_session:
+            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "ts": now.isoformat(),
+                "type": "query",
+                "question": f"[unlogged — first tool: {tool_name}]",
+            }
+            with _LOG_PATH.open("a") as f:
+                f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass  # never let logging break a tool call
+
 
 def _log_tool_call(name: str, kwargs: dict, response: str) -> None:
     try:
@@ -89,6 +137,7 @@ def _logged_tool(*args, **kwargs):
     def decorator(fn):
         @functools.wraps(fn)
         async def logged(**fkwargs):
+            _maybe_log_session_start(fn.__name__)
             result = await fn(**fkwargs)
             _log_tool_call(fn.__name__, fkwargs, result)
             return result
@@ -378,6 +427,28 @@ async def get_router_health(
         },
         indent=2,
     )
+
+
+@mcp.tool()
+async def get_conductor_summary() -> str:
+    """Get a compact health overview of the entire conductor deployment.
+
+    Returns aggregate counts rather than raw lists, making it safe to call on
+    conductors managing hundreds or thousands of routers. Specifically:
+    - Conductor software version and alarm counts
+    - Router counts: total, connected, disconnected (disconnected names capped
+      at 20; use list_routers if you need the full list)
+    - Alarm counts by severity across all routers, sorted by worst severity
+      first, with a per-router breakdown of which routers have alarms
+
+    Use this as the first call in a conductor-wide health check instead of
+    list_routers + get_assets + get_alarms. Follow up with get_router_health
+    on specific routers identified here.
+
+    Context: conductor only
+    """
+    result = await get_client().get_conductor_summary()
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -2332,50 +2403,52 @@ def health_check(router: str | None = None) -> str:
         else "Run a health check of this SSR deployment."
     )
     scope_step = (
-        f"Go straight to Step 4 (single-router deep dive) for router `{router}`."
+        f"Go straight to Step 5 (single-router deep dive) for router `{router}`."
         if router
         else (
             "Branch on mode:\n\n"
-            "- **conductor mode, no router specified** → proceed to Step 3 "
+            "- **conductor mode, no router specified** → proceed to Step 4 "
             "(conductor-wide triage), then stop and wait.\n"
-            "- **any router mode** → skip Step 3, go straight to Step 4 using "
+            "- **any router mode** → skip Step 4, go straight to Step 5 using "
             "the router and node from `get_connection_info`."
         )
     )
     return f"""{intro}
 
-## Step 1 — Establish context
+## Step 1 — Log the query
+
+Call `begin_query` with a one-sentence description of what the user asked (e.g.
+"Health check of the full SSR deployment" or "Health check for router X").
+
+## Step 2 — Establish context
 
 Call `get_connection_info`. Note the mode, router name, and node name — you will
 need them throughout.
 
-## Step 2 — Determine scope
+## Step 3 — Determine scope
 
 {scope_step}
 
-## Step 3 — Conductor-wide triage
+## Step 4 — Conductor-wide triage
 
-Call all four **in parallel**:
-- `list_routers`
-- `get_assets`
-- `get_alarms`
-- `get_system_state` (no router argument)
+Call `get_conductor_summary`. This returns aggregate counts safe for any deployment
+size — do not call list_routers, get_assets, or get_alarms here.
 
 **Report a summary table:**
 
-| Router | Connected | State | Active Alarms | Notes |
-|--------|-----------|-------|---------------|-------|
+| Routers | Connected | Disconnected | Total Alarms | Critical | Major |
+|---------|-----------|--------------|--------------|----------|-------|
 
-- A router with `managementConnected: false` is **UNREACHABLE** — do not query it
-  further.
-- List active alarms below the table, grouped by router and severity. Note shelved
+- List any disconnected routers by name. Note if the count was capped (the response
+  will say so) and tell the user they can ask for the full list.
+- List alarms below the table grouped by router, worst severity first. Note shelved
   alarms separately as operator-acknowledged (not urgent).
 - Give a one-sentence overall verdict.
-- Identify the single most problematic router (priority: unreachable > most alarms >
-  degraded state). Suggest drilling into it by name. **Stop here and wait for the
-  user to confirm before proceeding to Step 4.**
+- Identify the single most problematic router (priority: disconnected > most critical
+  alarms > most major alarms). Suggest drilling into it by name. **Stop here and
+  wait for the user to confirm before proceeding to Step 5.**
 
-## Step 4 — Single-router deep dive
+## Step 5 — Single-router deep dive
 
 Call `get_router_info` for the target router. This provides node names (needed for
 the parallel calls below) and the software version. For HA routers with multiple
@@ -2394,7 +2467,7 @@ Then call **in parallel**:
 If `get_system_state` returns anything other than `RUNNING`, also call
 `get_system_processes` (router + node).
 
-## Step 5 — Report
+## Step 6 — Report
 
 Open with an overall verdict line: **HEALTHY**, **DEGRADED**, or **CRITICAL**.
 

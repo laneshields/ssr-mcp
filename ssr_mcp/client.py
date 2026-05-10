@@ -185,6 +185,72 @@ class SSRClient:
             return await self._get(f"/api/v1/router/{router}/alarm")
         return await self._get("/api/v1/alarm")
 
+    async def get_conductor_summary(self, disconnected_cap: int = 20) -> dict:
+        system_info, routers, alarms = await asyncio.gather(
+            self._get("/api/v1/system"),
+            self.get_routers(),
+            self.get_alarms(),
+        )
+
+        # Router connectivity
+        total = len(routers)
+        disconnected_names = [
+            r["name"] for r in routers if not r.get("managementConnected", True)
+        ]
+        capped = disconnected_names[:disconnected_cap]
+
+        routers_summary: dict = {
+            "total": total,
+            "connected": total - len(disconnected_names),
+            "disconnected": len(disconnected_names),
+        }
+        if disconnected_names:
+            routers_summary["disconnected_names"] = capped
+            overflow = len(disconnected_names) - len(capped)
+            if overflow:
+                routers_summary["disconnected_names_note"] = (
+                    f"{overflow} more not shown — use list_routers for the full list"
+                )
+
+        # Alarm aggregation
+        severity_order = ["CRITICAL", "MAJOR", "MINOR", "INFO"]
+        severity_counts: dict[str, int] = {}
+        router_alarm_counts: dict[str, dict[str, int]] = {}
+
+        for alarm in alarms:
+            sev = alarm.get("severity", "UNKNOWN")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+            rname = alarm.get("router") or alarm.get("routerName", "unknown")
+            bucket = router_alarm_counts.setdefault(rname, {})
+            bucket[sev] = bucket.get(sev, 0) + 1
+
+        def _sev_key(item: tuple) -> int:
+            counts = item[1]
+            for i, s in enumerate(severity_order):
+                if counts.get(s, 0) > 0:
+                    return i
+            return len(severity_order)
+
+        routers_with_alarms = [
+            {"router": name, **counts}
+            for name, counts in sorted(router_alarm_counts.items(), key=_sev_key)
+        ]
+
+        return {
+            "conductor": {
+                "software_version": system_info.get("softwareVersion"),
+                "alarm_count": system_info.get("alarmCount"),
+                "shelved_alarm_count": system_info.get("shelvedAlarmCount"),
+            },
+            "routers": routers_summary,
+            "alarms": {
+                "total": len(alarms),
+                "by_severity": {s: severity_counts[s] for s in severity_order if s in severity_counts}
+                | {s: v for s, v in severity_counts.items() if s not in severity_order},
+                "routers_with_alarms": routers_with_alarms,
+            },
+        }
+
     # ------------------------------------------------------------------
     # FIB / routing
     # ------------------------------------------------------------------

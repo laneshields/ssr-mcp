@@ -568,6 +568,14 @@ async def test_get_waypoint_utilization(c: SSRClient, ctx: TestContext):
 # ---------------------------------------------------------------------------
 
 @register(modes=["conductor"])
+async def test_get_conductor_summary(c: SSRClient, ctx: TestContext):
+    r = await c.get_conductor_summary()
+    assert isinstance(r, dict)
+    assert "routers" in r and "alarms" in r and "conductor" in r
+    assert isinstance(r["routers"]["total"], int)
+    assert isinstance(r["alarms"]["total"], int)
+
+@register(modes=["conductor"])
 async def test_get_assets(c: SSRClient, ctx: TestContext):
     r = await c.get_assets()
     assert isinstance(r, (list, dict))
