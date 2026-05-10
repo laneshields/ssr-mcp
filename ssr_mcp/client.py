@@ -2209,6 +2209,16 @@ class SSRClient:
             "node": node,
         }
 
+    _IDP_STAT_IDS = [
+        "/stats/idp/attacks/total",
+        "/stats/idp/attacks/received",
+        "/stats/idp/attacks/missed",
+        "/stats/idp/packets/dropped",
+        "/stats/idp/packets/processed",
+        "/stats/idp/bytes/received",
+        "/stats/idp/bytes/transmitted",
+    ]
+
     async def get_idp_status(self, router: str, node: str) -> dict:
         engine_data = await self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state")
 
@@ -2226,6 +2236,19 @@ class SSRClient:
                 result[key] = await self._get(path)
             except Exception as e:
                 result[key] = {"error": str(e)}
+
+        stats: dict = {}
+        for stat_id in self._IDP_STAT_IDS:
+            try:
+                rows = await self.query_stats(router, stat_id)
+                if rows:
+                    val = rows[0].get("permutations", [{}])[0].get("value")
+                    key = stat_id.removeprefix("/stats/idp/").replace("/", ".")
+                    stats[key] = int(val) if val is not None and str(val).isdigit() else val
+            except Exception:
+                pass
+        if stats:
+            result["stats"] = stats
         return result
 
     _MIST_STRIP_CLOUD_KEYS = frozenset({"SSH", "Artifactory", "root_password"})

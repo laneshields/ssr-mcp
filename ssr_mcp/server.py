@@ -2193,6 +2193,13 @@ async def get_idp_status(router: str, node: str) -> str:
         latency, flow counts by protocol (current and peak), session counts,
         and active policy name
 
+      stats — cumulative IDP activity counters since last reset (only when
+        IDP enabled): attacks.total, attacks.received, attacks.missed,
+        packets.dropped, packets.processed, bytes.received, bytes.transmitted.
+        attacks.received > 0 confirms the IDP engine is actively detecting
+        and responding to threats. Individual event details are forwarded to
+        the Mist cloud dashboard; only aggregate counts are available locally.
+
     Note: the API spells 'accessible' as 'accesible' (one 's') in the
     securityPackages object — this is a known typo in the SSR API.
 
