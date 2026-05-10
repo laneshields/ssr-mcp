@@ -2214,6 +2214,45 @@ async def get_idp_status(router: str, node: str) -> str:
 
 
 @mcp.tool()
+async def get_security_events(
+    router: str,
+    node: str,
+    limit: int = 100,
+    subtype: str = "IDP",
+) -> str:
+    """Retrieve security events from the router's audit log.
+
+    Returns per-event detail for each detected threat, including:
+      attack        — signature or anomaly name (e.g. HTTP:KUBERNETS-CVE-2018-1002105)
+      cve_id        — associated CVE if known
+      threat_severity — CRITICAL / HIGH / MEDIUM / LOW / INFO
+      action        — what IDP did: CLOSE (session torn down), DROP, ALERT
+      is_alert      — true = logged only; false = actively blocked
+      msg_type      — SIG (signature match) or ANOMALY (protocol anomaly)
+      src_addr / src_port / src_interface — attack source
+      dest_addr / dest_port / dest_interface — targeted host
+      protocol      — TCP / UDP / ICMP
+      tenant_name   — SSR tenant the traffic belongs to
+      service_name  — SSR service matched
+      timestamp     — UTC time of detection
+
+    Use get_idp_status for engine health and aggregate attack counts.
+    Use this tool when you need to know what attacks occurred, against which
+    hosts, from which sources, and whether they were blocked or just logged.
+
+    Context: router
+
+    Args:
+        router:  Router name (required).
+        node:    Node name (required).
+        limit:   Maximum number of events to return (default 100).
+        subtype: Event subtype filter (default 'IDP').
+    """
+    data = await get_client().get_security_events(router, node, limit=limit, subtype=subtype)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
 async def get_mist_info(router: str, node: str) -> str:
     """Return Mist/cloud management details for a router managed by Juniper Mist.
 

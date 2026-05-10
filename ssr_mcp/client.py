@@ -2251,6 +2251,39 @@ class SSRClient:
             result["stats"] = stats
         return result
 
+    async def get_security_events(
+        self,
+        router: str,
+        node: str,
+        limit: int = 100,
+        subtype: str = "IDP",
+    ) -> list:
+        page_size = 50
+        offset = 0
+        events: list = []
+
+        while True:
+            remaining = limit - len(events)
+            if remaining <= 0:
+                break
+            batch = await self._get(
+                f"/api/v1/router/{router}/node/{node}/audit/security",
+                params={
+                    "type": "security",
+                    "subtype": subtype,
+                    "first": min(page_size, remaining),
+                    "after": offset,
+                },
+            )
+            if not batch:
+                break
+            events.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += len(batch)
+
+        return events
+
     _MIST_STRIP_CLOUD_KEYS = frozenset({"SSH", "Artifactory", "root_password"})
     _MIST_STRIP_STATE_KEYS = frozenset({"registration-code", "disable-upgradeFiles", "active-commands"})
 
