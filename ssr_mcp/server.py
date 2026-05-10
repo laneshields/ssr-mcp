@@ -180,7 +180,9 @@ async def get_connection_info() -> str:
 
       router-cloud    — SSR_HOST is a Mist/cloud-managed router with no
                         on-premises conductor. Only this router is accessible.
-                        Conductor-specific tools are not available.
+                        Conductor-specific tools are not available. A
+                        display_name field is included — use it (not the
+                        router UUID) when referring to the device to the user.
 
       router-standalone — SSR_HOST is a standalone router with no conductor
                           or cloud management. Only this router is accessible.
@@ -2201,6 +2203,30 @@ async def get_idp_status(router: str, node: str) -> str:
         node:   Node name (required).
     """
     data = await get_client().get_idp_status(router, node)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def get_mist_info(router: str, node: str) -> str:
+    """Return Mist/cloud management details for a router managed by Juniper Mist.
+
+    Includes cloud connection status, agent assignment, org/site IDs, device ID,
+    config health, interface roles, telemetry state, pushed cloud config (port
+    config, network, routing/service policies, VPN, DHCP, BGP, OSPF), and agent
+    runtime state. Sensitive fields (SSH authorized keys, Artifactory credentials,
+    root password hash) are stripped before returning.
+
+    Use this for deeper analysis of cloud-managed routers: verifying the device is
+    correctly assigned, checking which org/site it belongs to, inspecting the
+    cloud-pushed config, or diagnosing agent/connectivity issues with Mist.
+
+    Context: router (router-cloud mode)
+
+    Args:
+        router: Router name (the UUID/MAC-based name from get_connection_info).
+        node:   Node name (from get_connection_info).
+    """
+    data = await get_client().get_mist_info(router, node)
     return json.dumps(data, indent=2)
 
 

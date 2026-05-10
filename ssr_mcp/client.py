@@ -126,6 +126,15 @@ class SSRClient:
     async def get_routers(self) -> list:
         return await self._get("/api/v1/router")
 
+    async def _get_mist_display_name(self, router: str, node: str) -> str | None:
+        try:
+            detail = await self._get(
+                f"/api/v1/router/{router}/node/{node}/plugins/state/128T-mist-wan-assurance/detail"
+            )
+            return detail.get("Name") or detail.get("router-display-name") or None
+        except Exception:
+            return None
+
     async def get_connection_info(self) -> dict:
         info = await self._get("/api/v1/system")
         if info.get("isConductor"):
@@ -136,7 +145,7 @@ class SSRClient:
             mode = "router-managed"
         else:
             mode = "router-standalone"
-        return {
+        result: dict = {
             "mode": mode,
             "router": info.get("router"),
             "node": info.get("node"),
@@ -149,6 +158,12 @@ class SSRClient:
             "is_managed": info.get("isManaged"),
             "is_managed_by_cloud": info.get("isManagedByCloud"),
         }
+        if mode == "router-cloud":
+            router = info.get("router")
+            node = info.get("node")
+            if router and node:
+                result["display_name"] = await self._get_mist_display_name(router, node)
+        return result
 
     async def get_router(self, router: str) -> dict:
         return await self._get(f"/api/v1/router/{router}")
@@ -2212,6 +2227,21 @@ class SSRClient:
             except Exception as e:
                 result[key] = {"error": str(e)}
         return result
+
+    _MIST_STRIP_CLOUD_KEYS = frozenset({"SSH", "Artifactory", "root_password"})
+    _MIST_STRIP_STATE_KEYS = frozenset({"registration-code", "disable-upgradeFiles", "active-commands"})
+
+    async def get_mist_info(self, router: str, node: str) -> dict:
+        detail = await self._get(
+            f"/api/v1/router/{router}/node/{node}/plugins/state/128T-mist-wan-assurance/detail"
+        )
+        cloud = detail.get("Config", {}).get("mist", {}).get("cloud", {})
+        for key in self._MIST_STRIP_CLOUD_KEYS:
+            cloud.pop(key, None)
+        state = detail.get("State", {})
+        for key in self._MIST_STRIP_STATE_KEYS:
+            state.pop(key, None)
+        return detail
 
     # ------------------------------------------------------------------
     # Ping
