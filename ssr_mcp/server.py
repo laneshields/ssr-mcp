@@ -2314,6 +2314,126 @@ async def ping(
 
 
 # ------------------------------------------------------------------
+# Prompts
+# ------------------------------------------------------------------
+
+
+@mcp.prompt()
+def health_check(router: str | None = None) -> str:
+    """Run a guided health check.
+
+    Omit router for a conductor-wide triage followed by an offer to drill
+    into a specific router. Specify a router name to go straight to a
+    single-router deep dive.
+    """
+    intro = (
+        f"Run a health check for router `{router}`."
+        if router
+        else "Run a health check of this SSR deployment."
+    )
+    scope_step = (
+        f"Go straight to Step 4 (single-router deep dive) for router `{router}`."
+        if router
+        else (
+            "Branch on mode:\n\n"
+            "- **conductor mode, no router specified** → proceed to Step 3 "
+            "(conductor-wide triage), then stop and wait.\n"
+            "- **any router mode** → skip Step 3, go straight to Step 4 using "
+            "the router and node from `get_connection_info`."
+        )
+    )
+    return f"""{intro}
+
+## Step 1 — Establish context
+
+Call `get_connection_info`. Note the mode, router name, and node name — you will
+need them throughout.
+
+## Step 2 — Determine scope
+
+{scope_step}
+
+## Step 3 — Conductor-wide triage
+
+Call all four **in parallel**:
+- `list_routers`
+- `get_assets`
+- `get_alarms`
+- `get_system_state` (no router argument)
+
+**Report a summary table:**
+
+| Router | Connected | State | Active Alarms | Notes |
+|--------|-----------|-------|---------------|-------|
+
+- A router with `managementConnected: false` is **UNREACHABLE** — do not query it
+  further.
+- List active alarms below the table, grouped by router and severity. Note shelved
+  alarms separately as operator-acknowledged (not urgent).
+- Give a one-sentence overall verdict.
+- Identify the single most problematic router (priority: unreachable > most alarms >
+  degraded state). Suggest drilling into it by name. **Stop here and wait for the
+  user to confirm before proceeding to Step 4.**
+
+## Step 4 — Single-router deep dive
+
+Call `get_router_info` for the target router. This provides node names (needed for
+the parallel calls below) and the software version. For HA routers with multiple
+nodes, run all node-scoped tools for each node.
+
+Then call **in parallel**:
+- `get_system_state` (router + node)
+- `get_system_connectivity` (router)
+- `get_node_utilization` (router + node)
+- `get_session_processor_utilization` (router + node)
+- `get_capacity` (router + node)
+- `get_idp_status` (router + node)
+- `get_source_nat_utilization` (router + node)
+- `get_waypoint_utilization` (router + node)
+
+If `get_system_state` returns anything other than `RUNNING`, also call
+`get_system_processes` (router + node).
+
+## Step 5 — Report
+
+Open with an overall verdict line: **HEALTHY**, **DEGRADED**, or **CRITICAL**.
+
+Report each section below. Omit sections with nothing notable.
+
+### Software State
+State value and software version. If not `RUNNING`, list processes not in their
+expected state — `highway` and `conflux` are most critical.
+
+### Connectivity
+Skip this section entirely if `connectivity` is an empty array (expected for
+cloud-managed single-node routers).
+Otherwise flag any entry not in `CONNECTED` state. For each flagged entry identify
+whether it is a conductor link (management plane) or an HA node-to-node link.
+
+### Node Resources
+CPU, memory, and disk per node. Flag `cpu_high: true` (≥90%) and `disk_high: true`
+(≥85%) prominently.
+
+### Service Area
+`get_session_processor_utilization` state (`Normal`/`High`) and per-thread CPU.
+Flag `High` prominently.
+
+### Capacity Pools
+Utilization for FIB_TABLE, FLOW_TABLE, ACTION_POOL, SOURCE_TENANT_TABLE, and
+ACCESS_POLICY_TABLE. Flag any pool above 80%.
+
+### IDP
+Skip this section entirely if `idpTopology == "disabled"`.
+Otherwise report: engine state, security package accessibility
+(`securityPackages.accesible`), network reachability (`networks[].pingable`), pod
+state, and SPU CPU/memory/flow utilization. Flag any failures.
+
+Silently skip `get_source_nat_utilization` and `get_waypoint_utilization` results
+if they return `available: false`.
+"""
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 
