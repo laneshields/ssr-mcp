@@ -2169,16 +2169,27 @@ async def get_waypoint_utilization(router: str, node: str) -> str:
 async def get_idp_status(router: str, node: str) -> str:
     """Get IDP (Intrusion Detection and Prevention) status for a router node.
 
-    Combines the IDP engine state and cSRX container health into a single call.
+    Combines IDP engine state, cSRX container health, SPU utilization, and
+    detailed IDP traffic statistics into a single call.
 
-    When idpTopology is 'disabled' the node has no IDP configuration — no
-    further analysis is needed. When enabled, the response reports:
-      - engine.current: 'on' when the IDP engine is running
-      - engine.securityPackages: threat signature version, accessibility,
-        and last/next update timestamps
-      - networks: IDP internal network reachability (all should be pingable)
-      - pod.podState / pod.dockerState: cSRX container state ('active'/'running'
-        when healthy, 'unconfigured' when IDP is not enabled)
+    When idpTopology is 'disabled' the node has no IDP configuration — only
+    engine and pod fields are returned. When enabled, the full response includes:
+
+      engine — overall engine state:
+        current: 'on' when running; securityPackages: signature version,
+        accessibility, last/next update; networks: internal network reachability
+
+      pod — cSRX container health:
+        podState / dockerState: 'active'/'running' when healthy
+
+      monitoring — SPU resource utilization (only when IDP enabled):
+        SpuCPUUtilization, SpuMemoryUtilization, SpuCurrentFlowSession,
+        SpuMaxFlowSession
+
+      idp — traffic and flow detail (only when IDP enabled):
+        uptime, packets/sec and kbits/sec with peak values, min/max/avg
+        latency, flow counts by protocol (current and peak), session counts,
+        and active policy name
 
     Note: the API spells 'accessible' as 'accesible' (one 's') in the
     securityPackages object — this is a known typo in the SSR API.

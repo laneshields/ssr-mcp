@@ -2193,11 +2193,23 @@ class SSRClient:
         }
 
     async def get_idp_status(self, router: str, node: str) -> dict:
-        engine_data, pod_data = await asyncio.gather(
-            self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state"),
+        engine_data = await self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state")
+
+        if engine_data.get("idpTopology") == "disabled":
+            pod_data = await self._get(f"/api/v1/router/{router}/node/{node}/pods/csrx")
+            return {"engine": engine_data, "pod": pod_data}
+
+        pod_data, monitoring_data, idp_data = await asyncio.gather(
             self._get(f"/api/v1/router/{router}/node/{node}/pods/csrx"),
+            self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state/monitoring"),
+            self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state/idp"),
         )
-        return {"engine": engine_data, "pod": pod_data}
+        return {
+            "engine": engine_data,
+            "pod": pod_data,
+            "monitoring": monitoring_data,
+            "idp": idp_data,
+        }
 
     # ------------------------------------------------------------------
     # Ping
