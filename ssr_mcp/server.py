@@ -2126,6 +2126,46 @@ async def get_bgp_neighbors(
 
 
 @mcp.tool()
+async def get_source_nat_utilization(router: str, node: str) -> str:
+    """Get source NAT pool utilization for a router node.
+
+    STUB: Source NAT pool utilization is not yet exposed via the SSR REST or
+    GraphQL APIs. This tool returns an unavailable marker so health check
+    workflows can handle it gracefully. When this data becomes available via
+    the API, this tool will be updated to return actual utilization.
+
+    Source NAT pool exhaustion causes new sessions requiring NAT to fail
+    even when routing and service paths are healthy.
+
+    Args:
+        router: Router name (required).
+        node:   Node name (required).
+    """
+    data = await get_client().get_source_nat_utilization(router, node)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def get_waypoint_utilization(router: str, node: str) -> str:
+    """Get SVR waypoint pool utilization for a router node.
+
+    STUB: Waypoint pool utilization is not yet exposed via the SSR REST or
+    GraphQL APIs. This tool returns an unavailable marker so health check
+    workflows can handle it gracefully. When this data becomes available via
+    the API, this tool will be updated to return actual utilization.
+
+    Waypoint pool exhaustion prevents new SVR sessions from being established
+    even when peer paths are up and BFD is healthy.
+
+    Args:
+        router: Router name (required).
+        node:   Node name (required).
+    """
+    data = await get_client().get_waypoint_utilization(router, node)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
 async def get_idp_status(router: str, node: str) -> str:
     """Get IDP (Intrusion Detection and Prevention) status for a router node.
 

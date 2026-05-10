@@ -2176,6 +2176,22 @@ class SSRClient:
     # IDP
     # ------------------------------------------------------------------
 
+    async def get_source_nat_utilization(self, router: str, node: str) -> dict:
+        return {
+            "available": False,
+            "reason": "Source NAT pool utilization is not yet exposed via the SSR REST or GraphQL APIs.",
+            "router": router,
+            "node": node,
+        }
+
+    async def get_waypoint_utilization(self, router: str, node: str) -> dict:
+        return {
+            "available": False,
+            "reason": "Waypoint pool utilization is not yet exposed via the SSR REST or GraphQL APIs.",
+            "router": router,
+            "node": node,
+        }
+
     async def get_idp_status(self, router: str, node: str) -> dict:
         engine_data, pod_data = await asyncio.gather(
             self._get(f"/api/v1/router/{router}/node/{node}/cadillac/state"),
