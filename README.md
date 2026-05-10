@@ -16,6 +16,7 @@ Once connected, Claude can work with your SSR network across 50+ tools covering:
 | **Performance** | Node utilization, capacity, top sources, time-series metrics |
 | **Platform** | Software version, system processes, services, ARP, DHCP leases |
 | **Application ID** | App classification cache, categories, FIB lookups |
+| **Security / IDP** | IDP engine and cSRX health, SPU utilization, per-event security audit log |
 | **Diagnostics** | Ping, running config, web filtering state |
 
 Claude understands the difference between connecting to a **conductor** (where all managed routers are accessible by name) and connecting **directly to a router** — and adjusts which tools are available accordingly.
@@ -171,7 +172,19 @@ sudo systemctl enable --now ssr-mcp
 
 ## Getting started with Claude
 
-Once connected, a good first message is:
+### Guided workflows (prompts)
+
+The server includes built-in prompts that walk Claude through multi-step investigations automatically. Invoke them by name:
+
+> *"Run the health_check prompt."*
+
+This runs a full health check — conductor-wide triage if connected to a conductor (unreachable routers, active alarms, system state), or a single-router deep dive (software state, connectivity, resources, IDP). You can also target a specific router directly:
+
+> *"Run the health_check prompt for router BOS1."*
+
+### Freeform questions
+
+For ad-hoc investigation, start by orienting Claude:
 
 > *"Call get_connection_info and tell me what you're connected to."*
 
