@@ -451,6 +451,16 @@ async def test_get_dropped_packets(c: SSRClient, ctx: TestContext):
     assert "total_dropped" in result
 
 @register()
+async def test_get_fragmentation_stats(c: SSRClient, ctx: TestContext):
+    r = await c.get_fragmentation_stats(ctx.router)
+    assert "sent" in r and "received" in r
+    assert "ipv4_dont_fragment_drop" in r["sent"]
+    assert "ipv4_packets_fragmented" in r["sent"]
+    assert "successfully_reassembled" in r["received"]
+    assert all(isinstance(v, int) for v in r["sent"].values())
+    assert all(isinstance(v, int) for v in r["received"].values())
+
+@register()
 async def test_get_top_sources(c: SSRClient, ctx: TestContext):
     r = await c.get_top_sources(ctx.router, ctx.node)
     assert isinstance(r, (list, dict))

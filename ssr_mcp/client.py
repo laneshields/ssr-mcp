@@ -2084,6 +2084,38 @@ class SSRClient:
 
         return {"events": events, "skipped_count": skipped_count}
 
+    async def get_fragmentation_stats(self, router: str) -> dict:
+        base = "/stats/packet-processing/fragmentation"
+        stat_keys = [
+            ("sent", "ipv4-dont-fragment-drop"),
+            ("sent", "ipv4-packets-fragmented"),
+            ("sent", "ipv4-non-fabric-fragments"),
+            ("sent", "ipv4-fabric-fragments"),
+            ("received", "successfully-reassembled"),
+            ("received", "fragment-chains-timeout"),
+            ("received", "failure-to-reassemble"),
+        ]
+
+        async def fetch(direction: str, name: str) -> tuple[str, str, int]:
+            result = await self.query_stats(router, f"{base}/{direction}/{name}")
+            value = 0
+            if result and result[0].get("permutations"):
+                value = int(result[0]["permutations"][0].get("value") or 0)
+            return direction, name, value
+
+        results = await asyncio.gather(*[fetch(d, n) for d, n in stat_keys])
+
+        sent: dict[str, int] = {}
+        received: dict[str, int] = {}
+        for direction, name, value in results:
+            key = name.replace("-", "_")
+            if direction == "sent":
+                sent[key] = value
+            else:
+                received[key] = value
+
+        return {"sent": sent, "received": received}
+
     # ------------------------------------------------------------------
     # Node utilization
     # ------------------------------------------------------------------

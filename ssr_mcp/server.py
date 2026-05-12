@@ -2160,6 +2160,39 @@ async def query_stats(
 
 
 @mcp.tool()
+async def get_fragmentation_stats(router: str) -> str:
+    """Get IP fragmentation and reassembly counters for a router.
+
+    Use when investigating MTU/MSS-related slowness or packet loss. Two distinct
+    failure modes:
+
+    1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop non-zero):
+       A DF-set packet arrived that exceeded the SSR's configured egress interface
+       MTU. The SSR dropped it and sent ICMP Fragmentation Needed. Fix: lower the
+       interface MTU config or adjust the upstream sender's MSS.
+
+    2. Downstream MTU mismatch (all counters zero, but ping DF search fails):
+       The SSR's configured MTU is optimistic — a downstream hop silently drops
+       oversized packets without the SSR knowing. These counters do NOT fire for
+       this case. Use ping with dont_frag=True + binary search on packet size to
+       detect and confirm.
+
+    Key counters:
+      sent.ipv4_dont_fragment_drop   — SSR dropped DF-set packet (SSR is constraint)
+      sent.ipv4_packets_fragmented   — SSR fragmented a packet (DF not set)
+      sent.ipv4_non_fabric_fragments — fragments on standard IP-routed paths
+      sent.ipv4_fabric_fragments     — fragments on SVR paths
+      received.successfully_reassembled   — fragmented traffic arriving at SSR
+      received.fragment_chains_timeout    — reassembly timed out (~15s); lost fragments
+      received.failure_to_reassemble      — fragments collected but reassembly failed
+
+    Args:
+        router: Router name (required).
+    """
+    return json.dumps(await get_client().get_fragmentation_stats(router), indent=2)
+
+
+@mcp.tool()
 async def query_metrics(
     router: str,
     metric_id: str,
