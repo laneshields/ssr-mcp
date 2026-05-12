@@ -3361,6 +3361,25 @@ For services carrying affected traffic, call `list_service_paths` to confirm pat
 state and identify whether traffic uses SVR (`INTER_ROUTER`) or IP forwarding
 (`PUBLIC`). Proceed to Step 6 if SVR paths are in use.
 
+For each service path, examine these fields:
+- `state` — `"Up"` or `"Down"`. A down path is not forwarding traffic.
+- `warning` — if non-null, read it directly; it names the problem (e.g.,
+  `"Path link is down"`).
+- `meetsSLA` / `prevMeetsSLA` — SLA compliance now vs the preceding interval.
+  `meetsSLA: "No"` → path is currently failing configured SLA thresholds.
+  `prevMeetsSLA: "No"` with `meetsSLA: "Yes"` → path recently recovered; may
+  explain intermittent complaints. Correlate with alarms from Step 4.
+- `reachabilityProbeType` / `reachabilityProbes` — if `reachabilityProbeType`
+  is not null, the operator configured an ICMP reachability probe on this path.
+  Check each probe's `status`:
+  - `"up"` → destination is reachable.
+  - `"down"` → destination is unreachable via this path; traffic will failover
+    to another path if one exists. A probe that recently toggled (path up but
+    `prevMeetsSLA: "No"`) suggests flapping.
+- For `peer` (SVR) paths: `latency`, `jitter`, `loss` are populated per traffic
+  class. Elevated values on the specific service's path directly explain slow
+  or choppy traffic. Proceed to Step 6 for deeper peer path analysis.
+
 ### Branch B: `has_http_https` is false (or specified application not found)
 
 Without application-series data, establish what traffic is doing and look for
