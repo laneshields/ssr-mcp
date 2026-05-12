@@ -3361,10 +3361,42 @@ These are interface-level TCP health signals independent of application classifi
   rather than hard loss
 Cross-reference with the interface names from Step 4's retransmission result.
 
-**Traffic engineering check:**
-If all applications show `trafficClass` of `low` or `best-effort` only (check
-`summarize=False` output if needed), TE is not actively classifying traffic.
-Note this for the report if contention appears to be a factor.
+**Bandwidth and traffic engineering check:**
+
+Call in parallel (router only — no node parameter needed):
+- `query_stats` `/stats/traffic-eng/device-interface/per-traffic-class/schedule-success-bandwidth`
+  with `parameters=[{{"name": "traffic-class", "itemize": true}}]`
+- `query_stats` `/stats/traffic-eng/device-interface/per-traffic-class/schedule-failure-bandwidth`
+  with `parameters=[{{"name": "traffic-class", "itemize": true}}]`
+
+If the previous results are empty (count: 0), try the same paths under
+`/stats/traffic-eng/network-interface/...` with `network-interface` itemize — TE may
+be configured at the network-interface level instead (rare but valid).
+
+**Interpret:**
+- `schedule-failure-bandwidth == 0` for all classes → TE is not actively dropping
+  traffic; bandwidth contention is not the cause of slowness. Move on.
+- `schedule-failure-bandwidth > 0` for any class → TE is intentionally dropping
+  traffic for that class. This is the primary signal that the link is saturated
+  and TE is managing contention:
+  - `best-effort` drops only → lower-priority traffic being shaped; expected and
+    acceptable; real-time application traffic (high/medium/low) is protected.
+  - `low` class drops → most user traffic is being impacted; link is congested.
+  - `high` or `medium` drops → even prioritized traffic is being squeezed; link is
+    severely constrained.
+- Compare `schedule-success-bandwidth` vs `schedule-failure-bandwidth` per class
+  to quantify what fraction of each class is being dropped.
+- Cross-check with `get_device_interfaces` results from Step 4: compare
+  `averageBandwidth` (bps) against `state.speed` (Mbps × 1,000,000 bps) to see
+  whether the physical interface is near saturation.
+- If TE drops are present but `averageBandwidth` is well below physical speed: a
+  `transmit-cap` may be configured lower than the physical link rate. This is set
+  under `traffic-engineering.transmit-cap` in the device-interface config and creates
+  an effective cap independent of the physical interface speed.
+- `traffic_classes` from `get_application_series` (`summarize=True`) shows which
+  SSR queue slots this router's traffic is using. All traffic in `low` only means
+  no TE classification is active in the service config — contention still affects
+  all traffic equally rather than prioritizing by class.
 
 **Service path linkage:**
 For services carrying affected traffic, call `list_service_paths` to confirm path
@@ -3448,6 +3480,14 @@ affecting that service.
 If `tcp-resets-transmitted` by service is non-zero, call `query_stats
 tcp-invalid-state-transitions` and `tcp-bad-flag-combinations` by network-interface
 (same itemize parameters) to determine if the SSR is responding to malformed packets.
+
+**Bandwidth and TE check** — run the same TE stat queries as Branch A:
+- `query_stats` `/stats/traffic-eng/device-interface/per-traffic-class/schedule-success-bandwidth`
+- `query_stats` `/stats/traffic-eng/device-interface/per-traffic-class/schedule-failure-bandwidth`
+Both with `parameters=[{{"name": "traffic-class", "itemize": true}}]`. If empty, retry
+under `/stats/traffic-eng/network-interface/...`. Interpret using the same rules as
+Branch A: `schedule-failure-bandwidth > 0` means TE is actively dropping traffic;
+compare `averageBandwidth` from Step 4 against `state.speed × 1,000,000` for saturation.
 
 If the user can provide a specific source IP and destination, suggest running
 `troubleshoot_traffic` to follow the exact data-plane path for that flow.
@@ -3581,6 +3621,8 @@ A lower effective path MTU than configured `mtu` confirms the mismatch and its m
   hole), configured MTU vs effective path MTU from ping DF search, MSS enforcement state
 - Unavoidable UDP fragmentation on interface `<name>` — SSR fragmenting non-DF traffic;
   sub-optimal but expected; recommend raising upstream path MTU
+- WAN interface saturated — `averageBandwidth` near physical speed; which traffic
+  classes are dropping (`schedule-failure-bandwidth`); whether a `transmit-cap` is set
 - SSR forwarding plane constrained — session processor CPU or capacity pool near 100%
 - No clear SSR-side signal — problem may be external; describe what was checked
 
