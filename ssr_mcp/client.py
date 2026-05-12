@@ -2323,6 +2323,7 @@ class SSRClient:
         node: str,
         limit: int = 100,
         subtype: str = "IDP",
+        start_time: str | None = None,
     ) -> list:
         page_size = 50
         offset = 0
@@ -2332,14 +2333,17 @@ class SSRClient:
             remaining = limit - len(events)
             if remaining <= 0:
                 break
+            params: dict = {
+                "type": "security",
+                "subtype": subtype,
+                "first": min(page_size, remaining),
+                "after": offset,
+            }
+            if start_time:
+                params["startTime"] = start_time
             batch = await self._get(
                 f"/api/v1/router/{router}/node/{node}/audit/security",
-                params={
-                    "type": "security",
-                    "subtype": subtype,
-                    "first": min(page_size, remaining),
-                    "after": offset,
-                },
+                params=params,
             )
             if not batch:
                 break

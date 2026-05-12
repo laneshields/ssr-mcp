@@ -2486,43 +2486,130 @@ async def get_idp_status(router: str, node: str) -> str:
     return json.dumps(data, indent=2)
 
 
+_SECURITY_EVENT_NOISE = frozenset({
+    "node", "application", "dst_zone", "src_zone", "elapsed_time",
+    "email-from", "email-to", "file", "info", "tls_peer", "msg_id",
+    "severity", "threat-score", "in_bytes", "out_bytes",
+    "in_packets", "out_packets", "detection_time",
+})
+
+
+def _clean_security_event(event: dict) -> dict:
+    data = {k: v for k, v in event.get("data", {}).items() if k not in _SECURITY_EVENT_NOISE}
+    return {
+        "timestamp": event.get("timestamp"),
+        **data,
+    }
+
+
+def _summarize_security_events(events: list) -> dict:
+    by_attack: dict = {}
+    for event in events:
+        d = event.get("data", {})
+        key = d.get("attack", "UNKNOWN")
+        if key not in by_attack:
+            by_attack[key] = {
+                "attack": key,
+                "cve_id": d.get("cve_id") or None,
+                "msg_type": d.get("msg_type"),
+                "threat_severity": d.get("threat_severity"),
+                "action": d.get("action"),
+                "is_alert": d.get("is_alert"),
+                "count": 0,
+                "src_addrs": set(),
+                "dest_addrs": set(),
+                "services": set(),
+                "tenants": set(),
+            }
+        entry = by_attack[key]
+        entry["count"] += 1
+        if d.get("src_addr"):
+            entry["src_addrs"].add(d["src_addr"])
+        if d.get("dest_addr"):
+            entry["dest_addrs"].add(d["dest_addr"])
+        if d.get("service_name"):
+            entry["services"].add(d["service_name"])
+        if d.get("tenant_name"):
+            entry["tenants"].add(d["tenant_name"])
+
+    result = []
+    for entry in sorted(by_attack.values(), key=lambda x: x["count"], reverse=True):
+        result.append({
+            **{k: v for k, v in entry.items() if k not in ("src_addrs", "dest_addrs", "services", "tenants")},
+            "src_addrs": sorted(entry["src_addrs"]),
+            "dest_addrs": sorted(entry["dest_addrs"]),
+            "services": sorted(entry["services"]),
+            "tenants": sorted(entry["tenants"]),
+        })
+
+    timestamps = [e.get("timestamp") for e in events if e.get("timestamp")]
+    return {
+        "event_count": len(events),
+        "time_range": {
+            "newest": timestamps[0] if timestamps else None,
+            "oldest": timestamps[-1] if timestamps else None,
+        },
+        "attacks": result,
+    }
+
+
 @mcp.tool()
 async def get_security_events(
     router: str,
     node: str,
     limit: int = 100,
+    start_time: str | None = None,
+    summarize: bool = True,
     subtype: str = "IDP",
 ) -> str:
-    """Retrieve security events from the router's audit log.
-
-    Returns per-event detail for each detected threat, including:
-      attack        — signature or anomaly name (e.g. HTTP:KUBERNETS-CVE-2018-1002105)
-      cve_id        — associated CVE if known
-      threat_severity — CRITICAL / HIGH / MEDIUM / LOW / INFO
-      action        — what IDP did: CLOSE (session torn down), DROP, ALERT
-      is_alert      — true = logged only; false = actively blocked
-      msg_type      — SIG (signature match) or ANOMALY (protocol anomaly)
-      src_addr / src_port / src_interface — attack source
-      dest_addr / dest_port / dest_interface — targeted host
-      protocol      — TCP / UDP / ICMP
-      tenant_name   — SSR tenant the traffic belongs to
-      service_name  — SSR service matched
-      timestamp     — UTC time of detection
+    """Retrieve security events from the router's IDP audit log.
 
     Use get_idp_status for engine health and aggregate attack counts.
     Use this tool when you need to know what attacks occurred, against which
     hosts, from which sources, and whether they were blocked or just logged.
 
+    Events are returned newest-first. start_time limits results to events
+    that occurred at or after that timestamp (ISO 8601 UTC, e.g.
+    '2026-05-11T12:00:00Z'). Without start_time, the most recent `limit`
+    events are returned regardless of age.
+
+    summarize=True (default) groups events by attack type and returns counts,
+    unique source/dest IPs, severity, and action — useful for a quick overview.
+    summarize=False returns one cleaned record per event with these fields:
+      timestamp       — UTC time of detection
+      attack          — signature or anomaly name
+      cve_id          — associated CVE if known
+      threat_severity — CRITICAL / HIGH / MEDIUM / LOW / INFO
+      action          — CLOSE (session torn down) / DROP / ALERT
+      is_alert        — true = logged only; false = actively blocked
+      msg_type        — SIG (signature match) or ANOMALY (protocol anomaly)
+      src_addr / src_port / src_interface — attack source
+      dest_addr / dest_port / dest_interface — targeted host
+      protocol        — TCP / UDP / ICMP
+      tenant_name     — SSR tenant the traffic belongs to
+      service_name    — SSR service matched
+      session_id      — SSR session identifier
+      repeat_count    — number of times this attack repeated in the session
+      url             — URL targeted (populated for some HTTP attacks)
+
     Context: router
 
     Args:
-        router:  Router name (required).
-        node:    Node name (required).
-        limit:   Maximum number of events to return (default 100).
-        subtype: Event subtype filter (default 'IDP').
+        router:     Router name (required).
+        node:       Node name (required).
+        limit:      Maximum number of events to fetch (default 100).
+        start_time: ISO 8601 UTC lower bound (e.g. '2026-05-11T12:00:00Z').
+                    Events before this time are excluded.
+        summarize:  True (default) = grouped summary by attack type.
+                    False = one cleaned record per event.
+        subtype:    Event subtype filter (default 'IDP').
     """
-    data = await get_client().get_security_events(router, node, limit=limit, subtype=subtype)
-    return json.dumps(data, indent=2)
+    data = await get_client().get_security_events(
+        router, node, limit=limit, subtype=subtype, start_time=start_time
+    )
+    if summarize:
+        return json.dumps(_summarize_security_events(data), indent=2)
+    return json.dumps([_clean_security_event(e) for e in data], indent=2)
 
 
 @mcp.tool()

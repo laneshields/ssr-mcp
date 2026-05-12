@@ -669,8 +669,23 @@ async def test_get_security_events(c: SSRClient, ctx: TestContext):
     r = await c.get_security_events(ctx.router, ctx.node, limit=10)
     assert isinstance(r, list)
     if r:
-        assert "data" in r[0]
-        assert "attack" in r[0]["data"]
+        event = r[0]
+        assert "data" in event
+        assert "attack" in event["data"]
+        assert "timestamp" in event
+        # start_time: 1 second after the newest event → should return nothing
+        from datetime import datetime, timezone, timedelta
+        newest_dt = datetime.fromisoformat(r[0]["timestamp"].replace("Z", "+00:00"))
+        after_newest = (newest_dt + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        r2 = await c.get_security_events(ctx.router, ctx.node, limit=10, start_time=after_newest)
+        assert isinstance(r2, list)
+        assert len(r2) == 0, f"expected 0 events with start_time after newest, got {len(r2)}"
+        # start_time: 1 second before the oldest event → should return same or more events
+        oldest_dt = datetime.fromisoformat(r[-1]["timestamp"].replace("Z", "+00:00"))
+        before_oldest = (oldest_dt - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        r3 = await c.get_security_events(ctx.router, ctx.node, limit=10, start_time=before_oldest)
+        assert isinstance(r3, list)
+        assert len(r3) >= len(r), f"expected >= {len(r)} events with start_time before oldest, got {len(r3)}"
         assert "threat_severity" in r[0]["data"]
 
 # ---------------------------------------------------------------------------
