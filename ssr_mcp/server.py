@@ -770,7 +770,18 @@ async def get_network_interfaces(
 ) -> str:
     """Get network interface (VLAN) configuration and state, including
     configured and DHCP-resolved IP addresses, gateway, prefix length,
-    and the operational status of the underlying device interface.
+    the operational status of the underlying device interface, the configured
+    mtu, and enforcedMss.
+
+    MTU/MSS notes:
+    - mtu: the configured MTU on this interface. For IP-routed (non-SVR)
+      traffic, enforcedMss=automatic clamps TCP MSS based on this value.
+    - enforcedMss: automatic = SSR clamps TCP MSS; disabled = no clamping.
+    - For SVR traffic, MSS clamping uses the path-discovered MTU from
+      list_peer_paths, not this configured value.
+    - Even when SVR paths show a valid discovered MTU and enforcedMss is
+      automatic, verify this configured mtu matches the physical network
+      — it governs MSS for all non-SVR traffic through the interface.
 
     Each interface includes a globalId field — this is the internal global
     interface ID (giid) used by the routing stack. RIB next-hop entries

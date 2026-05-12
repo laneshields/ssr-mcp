@@ -531,6 +531,8 @@ class SSRClient:
                       dhcp
                       hostname
                       globalId
+                      mtu
+                      enforcedMss
                       tunnel {
                         destination
                         source {
