@@ -1786,9 +1786,45 @@ async def get_running_config(router: str | None = None) -> str:
 def _summarize_app_series(buckets: list, application: str | None = None) -> list:
     """Aggregate application series buckets into a per-application summary.
 
-    Byte totals use the peak value seen per client across buckets to avoid
-    double-counting the same session's bytes in multiple time windows.
+    When IDP is active, SSR uses service function chaining: traffic flows
+    LAN → SSR → idp-in (to IDP engine) → idp-out → SSR → WAN. The SSR
+    tracks two separate sessions for this path, so the same client address
+    appears twice per bucket in the raw data — once under the base service
+    (IDP→WAN leg) and once under the *-idp* variant (LAN→IDP leg). Both
+    legs carry the same packets, so naively summing would double every metric.
+
+    All per-client metrics therefore use max() across appearances of the same
+    address within each bucket. A side effect of max() is that the output
+    values reflect the peak single-interval observation for each client rather
+    than a window total. The retransmission *rate* (pct fields) is unaffected
+    because numerator and denominator use the same max basis.
+
+    Localization semantics for TCP fields:
+      tcp_retrans_from_server + dup_acks_fwd high → WAN downlink loss (server→client)
+      tcp_retrans_from_client + dup_acks_rev high → LAN or uplink loss (client→server)
+      ssr_retrans_to_* non-zero                   → SSR itself is retransmitting
     """
+    # Metrics read from the nextHopInterface level and deduped via max() per client addr.
+    _TCP_KEYS = (
+        "tcp_retrans_from_server",
+        "tcp_retrans_from_client",
+        "ssr_retrans_to_client",
+        "ssr_retrans_to_server",
+        "dup_acks_fwd",
+        "dup_acks_rev",
+        "out_of_window_fwd",
+        "out_of_window_rev",
+        "tcp_resets",
+        "new_sessions",
+        "rx_packets",
+        "tx_packets",
+        "ttfp_tcp_total_ms",
+        "ttfp_tcp_count",
+    )
+    # failed_sessions is at the client level (sessions dropped before nexthop assignment),
+    # not the nexthop level where it is always 0. Tracked separately.
+    _CLIENT_KEYS = ("failed_sessions",)
+
     apps: dict[str, dict] = {}
 
     for bucket in buckets:
@@ -1802,7 +1838,7 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                     "name": name,
                     "type": entry.get("type"),
                     "category": entry.get("category"),
-                    "client_stats": {},  # address -> {rx, tx}
+                    "client_stats": {},  # addr -> {rx, tx, sessions, tcp...}
                     "tenants": set(),
                     "services": set(),
                     "next_hop_types": set(),
@@ -1812,47 +1848,108 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
 
             for client in entry.get("clients", []):
                 addr = client.get("address", "unknown")
-                tenant = client.get("tenant")
-                if tenant:
-                    app["tenants"].add(tenant)
+                if client.get("tenant"):
+                    app["tenants"].add(client["tenant"])
                 for svc in client.get("services") or []:
                     app["services"].add(svc if isinstance(svc, str) else svc.get("name", str(svc)))
 
-                # Bytes are on nextHopInterface entries, not the client entry itself
-                nh_rx = sum((nh.get("rxBytes") or 0) for nh in client.get("nextHopInterface") or [])
-                nh_tx = sum((nh.get("txBytes") or 0) for nh in client.get("nextHopInterface") or [])
-
+                # Client-level fields (before nexthop assignment).
+                client_vals: dict[str, int] = {
+                    "failed_sessions": client.get("failedSessions") or 0,
+                }
                 active = client.get("activeSessions") or 0
 
-                if addr not in app["client_stats"]:
-                    app["client_stats"][addr] = {"rx": nh_rx, "tx": nh_tx, "sessions": active}
-                else:
-                    app["client_stats"][addr]["rx"] = max(app["client_stats"][addr]["rx"], nh_rx)
-                    app["client_stats"][addr]["tx"] = max(app["client_stats"][addr]["tx"], nh_tx)
-                    app["client_stats"][addr]["sessions"] = max(app["client_stats"][addr]["sessions"], active)
+                # Sum nexthop-level metrics across all nexthops for this appearance.
+                nh_rx = nh_tx = 0
+                tcp: dict[str, int] = {k: 0 for k in _TCP_KEYS}
 
                 for nh in client.get("nextHopInterface") or []:
-                    nh_type = nh.get("type")
-                    if nh_type:
-                        app["next_hop_types"].add(nh_type)
+                    if nh.get("type"):
+                        app["next_hop_types"].add(nh["type"])
+                    nh_rx += nh.get("rxBytes") or 0
+                    nh_tx += nh.get("txBytes") or 0
+                    tcp["tcp_retrans_from_server"] += nh.get("tcpRetransmissionPacketsFromServer") or 0
+                    tcp["tcp_retrans_from_client"] += nh.get("tcpRetransmissionPacketsFromClient") or 0
+                    tcp["ssr_retrans_to_client"] += nh.get("ssrInitiatedTcpRetransmissionPacketsToClient") or 0
+                    tcp["ssr_retrans_to_server"] += nh.get("ssrInitiatedTcpRetransmissionPacketsToServer") or 0
+                    tcp["dup_acks_fwd"] += nh.get("fwdTcpDuplicateAcks") or 0
+                    tcp["dup_acks_rev"] += nh.get("revTcpDuplicateAcks") or 0
+                    tcp["out_of_window_fwd"] += nh.get("fwdTcpOutOfWindows") or 0
+                    tcp["out_of_window_rev"] += nh.get("revTcpOutOfWindows") or 0
+                    tcp["tcp_resets"] += (
+                        (nh.get("rxFwdTcpResets") or 0)
+                        + (nh.get("rxRevTcpResets") or 0)
+                        + (nh.get("txFwdTcpResets") or 0)
+                        + (nh.get("txRevTcpResets") or 0)
+                    )
+                    tcp["new_sessions"] += nh.get("newSessions") or 0
+                    tcp["rx_packets"] += nh.get("rxPackets") or 0
+                    tcp["tx_packets"] += nh.get("txPackets") or 0
+                    ttfp = nh.get("timeToFirstDataPacketMs")
+                    if isinstance(ttfp, dict) and "TCP" in ttfp:
+                        tcp["ttfp_tcp_total_ms"] += ttfp["TCP"].get("total") or 0
+                        tcp["ttfp_tcp_count"] += ttfp["TCP"].get("count") or 0
+
+                # max() across appearances of the same addr (IDP dedup + bucket dedup)
+                if addr not in app["client_stats"]:
+                    app["client_stats"][addr] = {
+                        "rx": nh_rx, "tx": nh_tx, "sessions": active,
+                        **tcp, **client_vals,
+                    }
+                else:
+                    s = app["client_stats"][addr]
+                    s["rx"] = max(s["rx"], nh_rx)
+                    s["tx"] = max(s["tx"], nh_tx)
+                    s["sessions"] = max(s["sessions"], active)
+                    for k in _TCP_KEYS:
+                        s[k] = max(s[k], tcp[k])
+                    for k in _CLIENT_KEYS:
+                        s[k] = max(s[k], client_vals[k])
 
     result = []
     for app in apps.values():
-        total_rx = sum(c["rx"] for c in app["client_stats"].values())
-        total_tx = sum(c["tx"] for c in app["client_stats"].values())
-        total_sessions = sum(c["sessions"] for c in app["client_stats"].values())
+        clients = app["client_stats"]
+        total_rx = sum(c["rx"] for c in clients.values())
+        total_tx = sum(c["tx"] for c in clients.values())
+        total_sessions = sum(c["sessions"] for c in clients.values())
+        # Sum deduplicated per-client totals across all clients
+        all_keys = _TCP_KEYS + _CLIENT_KEYS
+        tcp_totals: dict[str, int] = {k: sum(c[k] for c in clients.values()) for k in all_keys}
+        total_pkts = tcp_totals["rx_packets"] + tcp_totals["tx_packets"]
+        ttfp_ms = (
+            round(tcp_totals["ttfp_tcp_total_ms"] / tcp_totals["ttfp_tcp_count"])
+            if tcp_totals["ttfp_tcp_count"]
+            else None
+        )
+
         result.append({
             "name": app["name"],
             "type": app["type"],
             "category": app["category"],
             "active_sessions": total_sessions,
-            "unique_clients": len(app["client_stats"]),
-            "clients": sorted(app["client_stats"].keys()),
+            "new_sessions": tcp_totals["new_sessions"],
+            "failed_sessions": tcp_totals["failed_sessions"],
+            "unique_clients": len(clients),
+            "clients": sorted(clients.keys()),
             "tenants": sorted(app["tenants"]),
             "services": sorted(app["services"]),
             "next_hop_types": sorted(app["next_hop_types"]),
             "rx_bytes": total_rx,
             "tx_bytes": total_tx,
+            "rx_packets": tcp_totals["rx_packets"],
+            "tx_packets": tcp_totals["tx_packets"],
+            "tcp_retrans_from_server": tcp_totals["tcp_retrans_from_server"],
+            "tcp_retrans_from_server_pct": round(100 * tcp_totals["tcp_retrans_from_server"] / total_pkts, 2) if total_pkts else None,
+            "tcp_retrans_from_client": tcp_totals["tcp_retrans_from_client"],
+            "tcp_retrans_from_client_pct": round(100 * tcp_totals["tcp_retrans_from_client"] / total_pkts, 2) if total_pkts else None,
+            "ssr_retrans_to_client": tcp_totals["ssr_retrans_to_client"],
+            "ssr_retrans_to_server": tcp_totals["ssr_retrans_to_server"],
+            "dup_acks_fwd": tcp_totals["dup_acks_fwd"],
+            "dup_acks_rev": tcp_totals["dup_acks_rev"],
+            "out_of_window_fwd": tcp_totals["out_of_window_fwd"],
+            "out_of_window_rev": tcp_totals["out_of_window_rev"],
+            "tcp_resets": tcp_totals["tcp_resets"],
+            "avg_tcp_connection_ms": ttfp_ms,
         })
 
     return sorted(result, key=lambda x: x["rx_bytes"] + x["tx_bytes"], reverse=True)
@@ -1880,11 +1977,34 @@ async def get_application_series(
     The raw API is extremely verbose (per-client, per-nexthop stats across
     multiple time buckets). Use summarize=True (default) for a clean
     per-application summary: client IPs, tenants, services in use, WAN path
-    types, and rx/tx byte totals.
+    types, rx/tx byte totals, and TCP health metrics.
 
     Use summarize=False only when you need per-client or per-nexthop detail
     for a specific flow investigation — combine with the application filter
     to keep the response manageable.
+
+    TCP health fields in the summarize output (key for slow-traffic triage):
+      tcp_retrans_from_server / tcp_retrans_from_server_pct
+          Server is retransmitting → loss on the WAN downlink (server→client).
+      tcp_retrans_from_client / tcp_retrans_from_client_pct
+          Client is retransmitting → loss on the LAN or WAN uplink (client→server).
+      ssr_retrans_to_client / ssr_retrans_to_server
+          SSR itself is retransmitting — non-zero means the SSR is the bottleneck.
+      dup_acks_fwd / dup_acks_rev
+          Duplicate ACKs in the forward (fwd) and reverse (rev) directions;
+          corroborate retransmission direction — fwd high → WAN downlink loss,
+          rev high → LAN/uplink loss.
+      out_of_window_fwd / out_of_window_rev
+          TCP out-of-window events; elevated fwd suggests client buffer exhaustion,
+          elevated rev suggests server buffer exhaustion.
+      tcp_resets     — total TCP RST events; elevated = connections being torn down.
+      failed_sessions — sessions that could not be established.
+      avg_tcp_connection_ms — mean time to first data packet for TCP flows;
+          effectively RTT to the server plus server processing time.
+
+    services field maps each application to the SSR service(s) handling it —
+    use with list_service_paths to check path health and SVR vs IP forwarding.
+    next_hop_types: PUBLIC = plain IP forwarding; INTER_ROUTER = SVR peer path.
 
     Args:
         router:         Router name (required).
@@ -2826,6 +2946,379 @@ state, and SPU CPU/memory/flow utilization. Flag any failures.
 
 Silently skip `get_source_nat_utilization` and `get_waypoint_utilization` results
 if they return `available: false`.
+"""
+
+
+@mcp.prompt()
+def troubleshoot_slow_traffic(
+    router: str | None = None,
+    application: str | None = None,
+) -> str:
+    """Guided slow-traffic / performance triage for a specific router.
+
+    Use when a user reports that an application or connection feels slow,
+    bandwidth is lower than expected, or latency is high — as opposed to
+    traffic being completely broken (use troubleshoot_traffic for that).
+
+    The central goal is to determine whether the SSR itself is the source
+    of the problem, or whether the problem lies north (WAN/internet) or
+    south (LAN) of the SSR — and to name the specific interface or path
+    where evidence points.
+
+    Args:
+        router: Router name. In conductor mode, required; in router mode,
+            defaults to the connected router.
+        application: Application the user reports as slow (e.g. "Teams",
+            "YouTube", "Zoom"). Case-insensitive substring match against
+            get_application_series results.
+    """
+    parts = []
+    if router:
+        parts.append(f"router `{router}`")
+    if application:
+        parts.append(f"application `{application}`")
+    scope_desc = ", ".join(parts) if parts else "this SSR deployment"
+    intro = f"Troubleshoot a slow-traffic / performance problem on {scope_desc}."
+
+    router_step = (
+        f"The target router is `{router}`. Skip straight to `get_router_info` for it."
+        if router
+        else (
+            "- **conductor mode** → ask the user which router to investigate if not "
+            "already clear from context.\n"
+            "- **router mode** → use the router and node from `get_connection_info`."
+        )
+    )
+
+    app_hint = (
+        f"\n\nThe user identified `{application}` as the slow application. "
+        "In Step 5, filter `get_application_series` by this name. If it does not "
+        "appear in results, note that no traffic matching that name was seen in the "
+        "last 30 minutes and ask whether the application is actively generating "
+        "traffic before proceeding with unfiltered analysis."
+        if application
+        else ""
+    )
+
+    return f"""{intro}
+{app_hint}
+
+The central goal is to determine whether the SSR itself is the source of the problem,
+or whether evidence points north or south of the SSR — and to name the specific
+interface or path where that evidence lands.
+
+## Step 1 — Log the query
+
+Call `begin_query` with a one-sentence description of what the user reported
+(e.g. "Teams calls are choppy on router X" or "Internet feels slow on lane-ssr400").
+
+Throughout this workflow: if any tool returns a result that looks wrong or inconsistent
+— a field that should have a value returning empty or `"unknown"`, a response shape
+that doesn't match the documented format, or data that contradicts another tool's
+output — call `report_issue` to log it before continuing. If the user expresses
+dissatisfaction with any result or analysis, call `report_feedback` immediately.
+
+## Step 2 — Establish context
+
+Call `get_connection_info`. Note the mode, router name, and node name.
+
+{router_step}
+
+Call `get_router_info` for the target router. Record:
+- Node name(s) — required by all router-scoped tools.
+- `app_id.has_http_https` — determines whether `get_application_series` is available.
+
+## Step 3 — SSR health snapshot
+
+Call **in parallel** (router + node):
+- `get_session_processor_utilization` — service area CPU and thread state
+- `get_capacity` — FIB, flow table, action pool utilization
+- `get_node_utilization` — CPU, memory, disk
+- `get_source_nat_utilization` — source NAT port pool (skip silently if `available: false`)
+- `get_waypoint_utilization` — waypoint port pool (skip silently if `available: false`)
+
+**Interpret:**
+- `get_session_processor_utilization`: if any thread shows `state != "Normal"` or
+  CPU sustained above 80%, the SSR's forwarding plane is under pressure. Note it and
+  continue — the SSR may still be showing application symptoms worth investigating.
+- `get_capacity`: pool exhaustion causes session drops, not gradual slowness — only
+  flag if a pool is at or very near 100%. Redirect to `health_check` if so.
+- `get_node_utilization`: flag `cpu_high` and `disk_high` if set.
+- Source NAT / waypoint pools: port exhaustion causes failed or hanging sessions
+  that can appear as intermittent slowness. Flag if pool is exhausted.
+
+## Step 4 — Universal diagnostics
+
+Run regardless of app-id availability. Call **in parallel** (router + node):
+- `get_dropped_packets` — session establishment failures: service area drops, policy
+  rejections. A cluster of drops from many source IPs hitting the same service
+  suggests resource exhaustion (source NAT, waypoint, session processor). Note:
+  these are failed session setups, not mid-stream packet loss.
+- `get_network_interfaces` — operational state of all interfaces; flag any that
+  are down or degraded.
+- `get_device_interfaces` — physical interface health; flag errors, speed/duplex
+  mismatches. A half-duplex mismatch causes slow-but-not-broken symptoms.
+- `get_alarms` (router) — active alarms may already name the problem directly.
+- `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-retransmissions`
+  and `parameters=[{{"name": "network-interface", "itemize": true}}]` — which interface
+  has active retransmissions. Primary loss-localization signal before app-series is
+  run: the interface with the highest count is the first suspect.
+- `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-resets-transmitted`
+  and `parameters=[{{"name": "network-interface", "itemize": true}}]` — RSTs the SSR
+  itself sent. Non-zero means the SSR is actively terminating connections.
+
+Then call `get_bgp_summary` (router + node) **if BGP is configured**:
+- All neighbors Established → BGP healthy, move on quickly.
+- Any neighbor not Established → flag it. A missing BGP neighbor removes route
+  coverage from that peer, which is more likely a broken-traffic cause than
+  a slow-traffic cause. Note it and suggest `troubleshoot_traffic` if the user's
+  affected traffic depends on routes from that peer.
+- Do not attempt to determine whether specific routes are missing — that belongs
+  in `troubleshoot_traffic`.
+
+**Interpret Step 4 results:**
+- `get_dropped_packets` non-empty → SSR is failing to establish sessions; note
+  the service and source pattern. Redirect to `troubleshoot_traffic` if this is
+  the primary complaint.
+- TCP retransmissions by network-interface → interfaces with non-zero counts are
+  where loss is observed. Carry these interface names forward into Step 5.
+  These are windowed ~5-second samples — zero at query time doesn't rule out
+  intermittent loss, but consistent elevation is a reliable signal.
+- TCP resets-transmitted non-zero → SSR is actively terminating connections. Call
+  `query_stats tcp-invalid-state-transitions` and `tcp-bad-flag-combinations` by
+  network-interface (same parameters) to distinguish the cause:
+  - Those stats elevated → SSR responding to malformed TCP (attack traffic, buggy
+    clients, or NAT state issues). Not a link-quality problem.
+  - Those stats near zero → RSTs from policy enforcement, capacity, or access control.
+
+**Interface correlation note:** observe which interfaces have problems (down, errors,
+alarms, retransmissions). You will use this in Step 5 to check whether the affected
+traffic actually traverses those interfaces. An interface problem on a path not used
+by the affected traffic should still be reported, but clearly noted as unrelated to
+the slow-traffic complaint.
+
+## Step 5 — Application-layer triage
+
+### Branch A: `has_http_https` is true
+
+Call `get_application_series` (router + node, `window_minutes=30`, `summarize=True`).
+If an application was specified, pass it as the `application` filter.
+
+**IDP note:** if IDP is enabled on this router, the same client address appears twice
+per time bucket — once under the base service (IDP→WAN leg) and once under the
+`*-idp*` service variant (LAN→IDP leg). The `summarize=True` output deduplicates
+these automatically. If using `summarize=False`, be aware of this duplication.
+
+**Pre-processing — exclude management traffic:**
+Entries where `clients[].tenant == "_internal_"` or
+`clients[].networkInterface == "controlKniIf"` are SSR management sessions.
+Exclude them from performance analysis.
+
+**Identify the two key interfaces for each application entry:**
+
+For each application, note:
+- `clients[].networkInterface` — where client traffic **enters** the SSR
+- `nextHopInterface[].interface` — where the SSR **forwards** traffic onward
+
+These are the localization anchors. Cross-reference with interface problems found
+in Step 4: if an interface with errors or alarms matches one of these, that
+strengthens the case that the interface is contributing to the problem.
+
+**Determine flow direction:**
+
+Inspect `clients[].address` and `clients[].tenant`:
+
+- **Outbound flow** (typical): client IP is private RFC1918 (10.x, 172.16–31.x,
+  192.168.x), or tenant is a LAN/internal tenant.
+  - `tcp_retrans_from_server` elevated → server retransmitting; problem is on or
+    beyond **`nextHopInterface[].interface`** (toward the server)
+  - `tcp_retrans_from_client` elevated → client retransmitting; problem is on or
+    before **`clients[].networkInterface`** (toward the client)
+
+- **Inbound flow** (WAN client → local service): client IP is a public address,
+  OR `clients[].tenant` is a WAN-facing tenant (e.g. `wan`), OR service name
+  starts with `*Host-Service-`.
+  - `tcp_retrans_from_client` elevated → WAN client retransmitting; problem is on
+    or beyond **`clients[].networkInterface`** (toward WAN)
+  - `tcp_retrans_from_server` elevated → local server retransmitting; problem is on
+    or beyond **`nextHopInterface[].interface`** (toward LAN)
+
+Report the suspected interface by name. E.g.: "retransmissions suggest a problem
+on or beyond interface `ge-0-3`."
+
+**TCP health signals:**
+- Use `tcp_retrans_from_server_pct` and `tcp_retrans_from_client_pct` to compare
+  severity across applications.
+- `ssr_retrans_to_client` or `ssr_retrans_to_server` non-zero → SSR is
+  retransmitting; correlate with session processor CPU from Step 3.
+- `dup_acks_fwd` / `dup_acks_rev` — corroborate the retransmission direction.
+- `out_of_window_fwd` — server-side receive buffer exhausted; may indicate
+  congestion between SSR and server, or a slow server.
+- `avg_tcp_connection_ms` (TTFP) — use for relative latency comparison across
+  applications, not as an absolute threshold. Biased downward under loss (failed
+  connections excluded from the average).
+
+**Pattern recognition:**
+- **One application elevated, others normal** → application-specific or server/CDN
+  issue; check `list_service_paths` for that service.
+- **All applications elevated on the same nexthop interface** → link-wide problem
+  on that interface; MTU/enforced-mss is a possible cause (stub — see Step 7).
+- **Retransmissions low but TTFP elevated uniformly** → latency rather than loss;
+  check peer path latency in Step 6.
+- **Drops in Step 4 correlate with retransmissions in app-series** → SSR is
+  the common thread; note source NAT / waypoint exhaustion if drops are
+  from many clients hitting the same service.
+
+**If app-series results are ambiguous** — retransmissions elevated but not clearly
+isolated to one interface, or no traffic found for the specified application:
+Call in parallel (same router + node):
+- `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-duplicate-acks`
+  and `parameters=[{{"name": "network-interface", "itemize": true}}]`
+- `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-out-of-window`
+  and `parameters=[{{"name": "network-interface", "itemize": true}}]`
+
+These are interface-level TCP health signals independent of application classification:
+- `tcp-duplicate-acks` elevated → corroborates retransmission direction on that interface
+- `tcp-out-of-window` elevated → receiver buffer pressure; consistent with congestion
+  rather than hard loss
+Cross-reference with the interface names from Step 4's retransmission result.
+
+**Traffic engineering check:**
+If all applications show `trafficClass` of `low` or `best-effort` only (check
+`summarize=False` output if needed), TE is not actively classifying traffic.
+Note this for the report if contention appears to be a factor.
+
+**Service path linkage:**
+For services carrying affected traffic, call `list_service_paths` to confirm path
+state and identify whether traffic uses SVR (`INTER_ROUTER`) or IP forwarding
+(`PUBLIC`). Proceed to Step 6 if SVR paths are in use.
+
+### Branch B: `has_http_https` is false (or specified application not found)
+
+Without application-series data, establish what traffic is doing and look for
+convergent signals across multiple tools.
+
+Call **in parallel** (router + node):
+- `get_top_sources` — which source IPs consume the most bandwidth; correlate with
+  interface problems found in Step 4 (is the heavy traffic on the affected interface?)
+- `list_services` — which services carry the most traffic; high session counts on a
+  specific service may point to overload or misconfiguration
+- `get_sessions` (`summarize=True`) — total active sessions and per-service
+  distribution; unexpectedly high counts suggest capacity pressure
+
+**Interpret with Step 4 context:** without app-series to name specific nexthop
+interfaces, use `get_top_sources` and `list_services` to infer whether traffic
+is flowing through the interface(s) where Step 4 found problems.
+
+If significant drops appear in `get_dropped_packets`: the SSR is rejecting sessions.
+If drops are from many source IPs hitting the same service, this points to resource
+exhaustion (source NAT, waypoint, or session processor). Redirect to
+`troubleshoot_traffic` for direct data-plane investigation.
+
+**TCP health drill-down** — call in parallel (same router + node):
+- `query_stats` with `stat_id=/stats/aggregate-session/service/tcp-retransmissions`
+  and `parameters=[{{"name": "service", "itemize": true}}]` — which service has the
+  most retransmissions; correlate with top-source bandwidth data
+- `query_stats` with `stat_id=/stats/aggregate-session/tenant/tcp-retransmissions`
+  and `parameters=[{{"name": "tenant", "itemize": true}}]` — which tenant's traffic
+  is most impacted
+- `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-duplicate-acks`
+  and `parameters=[{{"name": "network-interface", "itemize": true}}]` — directional
+  corroboration by interface
+- `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-out-of-window`
+  and `parameters=[{{"name": "network-interface", "itemize": true}}]` — receiver
+  buffer pressure; suggests congestion rather than hard packet loss
+- `query_stats` with `stat_id=/stats/aggregate-session/service/tcp-resets-transmitted`
+  and `parameters=[{{"name": "service", "itemize": true}}]` — which service the SSR
+  is actively RST-ing
+
+**Convergent signal:** the strongest conclusion available without app-id is when
+multiple signals agree. For example: Step 4 shows retransmissions on `ge-0-3` +
+service retransmissions concentrated on one service + that service's top-source
+traffic flowing through `ge-0-3` = strong case for a link quality problem on `ge-0-3`
+affecting that service.
+
+If `tcp-resets-transmitted` by service is non-zero, call `query_stats
+tcp-invalid-state-transitions` and `tcp-bad-flag-combinations` by network-interface
+(same itemize parameters) to determine if the SSR is responding to malformed packets.
+
+If the user can provide a specific source IP and destination, suggest running
+`troubleshoot_traffic` to follow the exact data-plane path for that flow.
+
+If app-id is supported by the router's software, recommend enabling `has_http_https`
+for richer per-application triage in future investigations.
+
+## Step 6 — Peer path investigation
+
+Call `list_peer_paths` (router + node) in either of these situations:
+- An SVR (`INTER_ROUTER`) path was identified in Step 5 for the affected traffic
+- Step 4 found interface problems and peer paths exist on that interface
+
+For peer paths **carrying the affected traffic** (SVR):
+- `loss > 0%` → directly explains elevated retransmissions; strong correlation.
+- High `latency` → explains elevated `avg_tcp_connection_ms` (TTFP).
+- High `jitter` → causes variable performance; correlates with dup ACKs.
+- Path not in active/up state → not carrying traffic.
+
+For peer paths **on the same interface but not carrying this traffic**:
+- Loss, latency, or jitter is supporting evidence that the underlying link has
+  quality issues — SVR probes see the same impairment as user traffic.
+- Important caveat: peer path metrics reflect conditions to the far-end peer, which
+  may be geographically distant. Degradation could originate at the far end, not
+  the local link. Present as supporting signal, not as proof of local failure.
+
+**If FPM (performance monitoring) is configured** on this router's adjacencies:
+`query_stats` provides richer per-service-class and per-protocol breakdown than
+the BFD-based metrics in `list_peer_paths`. Call in parallel, itemizing by
+`peer-name` and `service-class`:
+- `/stats/performance-monitoring/peer-path/latency`
+- `/stats/performance-monitoring/peer-path/jitter`
+- `/stats/performance-monitoring/peer-path/loss`
+- `/stats/performance-monitoring/peer-path/mos`
+
+FPM shows whether degradation is uniform across all traffic classes or concentrated
+on a specific class (e.g., `low`-latency traffic degraded while `best-effort` is
+fine). `mos` is ×100 in the API (so 450 = MOS 4.5) and directly models perceived
+voice/video call quality. FPM applies to SVR paths only — if traffic uses plain IP
+forwarding (`PUBLIC` nexthop), FPM stats are not available.
+
+## Step 7 — Report findings
+
+**Performance verdict** — state which of these best fits, with supporting data:
+- SSR is dropping sessions — specify service and likely cause (exhaustion vs policy)
+- Problem on interface `<name>` (toward server/nexthop) — retransmission evidence
+- Problem on interface `<name>` (toward client/ingress) — retransmission evidence
+- SVR peer path degraded — peer name, loss/latency/jitter
+- SSR forwarding plane constrained — session processor CPU or capacity pool near 100%
+- No clear SSR-side signal — problem may be external; describe what was checked
+
+**Supporting evidence:**
+- Affected applications and their retransmission rates (`_pct` fields), or top
+  bandwidth consumers and services if app-id unavailable
+- Interface problems found in Step 4, and whether traffic traverses them
+- Peer path metrics (note: SVR correlation vs supporting evidence)
+- SSR resource readings from Step 3
+
+**Recommendations:**
+- *SSR drops / resource exhaustion*: run `health_check`; source NAT and waypoint
+  pool exhaustion are stubs pending full API support.
+- *Interface-localized loss*: check upstream connectivity on that interface.
+  If retransmissions are uniformly high across all apps on the same interface,
+  MTU/enforced-mss is a possible cause (stub — see below).
+- *SVR peer path degraded*: use `ping` to test reachability to the peer's WAN
+  address; check `get_system_connectivity` on the peer router.
+- *No TE configured*: if contention appears to be a factor, suggest configuring
+  traffic engineering with `high`/`medium`/`low`/`best-effort` traffic classes
+  so the SSR can prioritize critical applications during congestion (stub —
+  transmit-cap and TE configuration not yet fully explored).
+
+**Stubs — mention if relevant, do not investigate further:**
+- *MTU / enforced-mss*: uniform retransmissions across all apps on one interface
+  may indicate a path MTU black-hole. The SSR's `enforced-mss` setting clamps TCP
+  SYN MSS values to prevent this. Suggest investigating enforced-mss configuration
+  and using `ping` with the DF bit at varying packet sizes to find the path MTU.
+- *Source NAT / waypoint port exhaustion*: if drops show many clients failing on
+  the same service, port pool exhaustion is possible. Full API support pending.
 """
 
 
