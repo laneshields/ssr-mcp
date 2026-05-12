@@ -2015,7 +2015,10 @@ async def get_application_series(
     next_hop_types: PUBLIC = plain IP forwarding; INTER_ROUTER = SVR peer path.
     svr_peers: router names of SVR peers carrying this application's traffic —
     use with list_peer_paths to check that specific peer's path health.
-    traffic_classes: SSR traffic classes (high/medium/low/best-effort) in use.
+    traffic_classes: SSR per-nexthop traffic class tags (high/medium/low/best-effort).
+    Reflects the queue slot the SSR assigns each flow, not whether TE is actively
+    enforcing differentiation. Without explicit TE config all traffic typically lands
+    in low regardless of what this field shows.
 
     Args:
         router:         Router name (required).
