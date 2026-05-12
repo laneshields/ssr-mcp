@@ -1132,6 +1132,16 @@ async def list_service_paths(
     """List service paths showing per-path state, SLA compliance, capacity,
     cost, and vector for each service route on a node.
 
+    Each path includes reachabilityProbeType and reachabilityProbes fields.
+    When reachabilityProbeType is not null, an ICMP reachability probe is
+    configured for that service route. The probe status ("up"/"down") is a
+    binary reachability signal. For actual performance metrics from the probe,
+    query these stats (itemize by node for HA pairs):
+      /stats/icmp/reachability-probe/service-routes/latency  (ms)
+      /stats/icmp/reachability-probe/service-routes/jitter   (ms)
+      /stats/icmp/reachability-probe/service-routes/loss     (%)
+    These stats aggregate across all probed service routes on the router.
+
     Args:
         router: Router name (required).
         node:   Node name within that router (required).
@@ -3376,6 +3386,16 @@ For each service path, examine these fields:
   - `"down"` → destination is unreachable via this path; traffic will failover
     to another path if one exists. A probe that recently toggled (path up but
     `prevMeetsSLA: "No"`) suggests flapping.
+  When any service path has a probe configured, query these stats in parallel
+  (itemize by node for HA pairs) to get actual performance metrics from the probe:
+  - `query_stats` `/stats/icmp/reachability-probe/service-routes/latency`
+  - `query_stats` `/stats/icmp/reachability-probe/service-routes/jitter`
+  - `query_stats` `/stats/icmp/reachability-probe/service-routes/loss`
+  These give live RTT (ms), jitter (ms), and loss (%) measured by the probe.
+  They aggregate across all probed service routes, so cross-reference with the
+  specific probed routes from `list_service_paths` when interpreting results.
+  Elevated probe latency/jitter with low loss → WAN latency problem toward the
+  probe destination. Elevated loss → link quality issue on that path.
 - For `peer` (SVR) paths: `latency`, `jitter`, `loss` are populated per traffic
   class. Elevated values on the specific service's path directly explain slow
   or choppy traffic. Proceed to Step 6 for deeper peer path analysis.
