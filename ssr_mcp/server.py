@@ -3222,6 +3222,8 @@ Run regardless of app-id availability. Call **in parallel** (router + node):
 - `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-resets-transmitted`
   and `parameters=[{{"name": "network-interface", "itemize": true}}]` — RSTs the SSR
   itself sent. Non-zero means the SSR is actively terminating connections.
+- `get_fragmentation_stats` (router only, no node parameter) — seven counters covering
+  DF-drop, fragmentation, and reassembly. Cheap call; the result drives Step 7.
 
 Then call `get_bgp_summary` (router + node) **if BGP is configured**:
 - All neighbors Established → BGP healthy, move on quickly.
@@ -3246,6 +3248,15 @@ Then call `get_bgp_summary` (router + node) **if BGP is configured**:
   - Those stats elevated → SSR responding to malformed TCP (attack traffic, buggy
     clients, or NAT state issues). Not a link-quality problem.
   - Those stats near zero → RSTs from policy enforcement, capacity, or access control.
+- Fragmentation (`get_fragmentation_stats`):
+  - `sent.ipv4_dont_fragment_drop > 0` → SSR received a DF-bit packet too large for
+    the outbound interface MTU and had to drop it. Always a misconfiguration. Carry
+    forward to Step 7.
+  - `sent.ipv4_packets_fragmented > 0` → SSR is fragmenting non-DF packets (typically
+    UDP). Sub-optimal but expected SSR behaviour. Carry forward to Step 7.
+  - All zeros → no fragmentation events at this moment. A downstream MTU black hole
+    is still possible; investigate in Step 7 only if Step 5 reveals link-wide
+    retransmissions that Step 6 cannot explain.
 
 **Interface correlation note:** observe which interfaces have problems (down, errors,
 alarms, retransmissions). You will use this in Step 5 to check whether the affected
@@ -3318,7 +3329,8 @@ on or beyond interface `ge-0-3`."
 - **One application elevated, others normal** → application-specific or server/CDN
   issue; check `list_service_paths` for that service.
 - **All applications elevated on the same nexthop interface** → link-wide problem
-  on that interface; MTU/enforced-mss is a possible cause (stub — see Step 7).
+  on that interface. If peer path metrics are clean (Step 6), investigate MTU/MSS
+  mismatch in Step 7.
 - **Retransmissions low but TTFP elevated uniformly** → latency rather than loss;
   check peer path latency in Step 6.
 - **Drops in Step 4 correlate with retransmissions in app-series** → SSR is
@@ -3438,13 +3450,98 @@ fine). `mos` is ×100 in the API (so 450 = MOS 4.5) and directly models perceive
 voice/video call quality. FPM applies to SVR paths only — if traffic uses plain IP
 forwarding (`PUBLIC` nexthop), FPM stats are not available.
 
-## Step 7 — Report findings
+## Step 7 — MTU/MSS investigation
+
+Run this step when **any** of the following is true:
+- Step 4 fragmentation stats show `sent.ipv4_dont_fragment_drop > 0`
+- Step 4 fragmentation stats show `sent.ipv4_packets_fragmented > 0`
+- Step 5 shows a link-wide retransmission pattern (all applications elevated on the
+  same nexthop interface) and Step 6 found no peer path quality issue explaining it
+
+Skip this step if none of these conditions are met.
+
+### MTU configuration context
+
+From `get_network_interfaces` results (already available from Step 4), for each WAN or
+nexthop interface implicated by the retransmission or fragmentation pattern, record:
+- `mtu` — configured interface MTU. Non-SVR TCP MSS clamping is derived from this value.
+  If this value is wrong (e.g., 1500 on a PPPoE link that only supports 1492), the SSR
+  will clamp MSS to the wrong size for non-SVR traffic.
+- `enforcedMss` — `automatic` means the SSR clamps TCP MSS to fit the MTU;
+  `disabled` means no clamping (TCP sessions are not protected from oversized segments).
+
+From `list_peer_paths` results (already available from Step 6, if SVR paths are in use),
+note the path-discovered `mtu` for SVR paths on the affected interface. SVR MSS clamping
+uses this value (not the configured interface MTU). Even with `enforcedMss=automatic`,
+verify that the configured interface `mtu` also matches the physical network MTU —
+SVR and non-SVR traffic use different MTU sources for MSS clamping.
+
+### Classify the fragmentation scenario
+
+**Scenario 1 — SSR is the MTU constraint (`ipv4_dont_fragment_drop > 0`):**
+The SSR received a DF-bit packet too large for the outbound interface MTU and dropped it.
+This is always a misconfiguration — the configured `mtu` on the interface does not match
+the actual network MTU.
+- If `enforcedMss=automatic`: TCP sessions are protected (MSS is clamped), but UDP and
+  IP-fragmented traffic are not. DF-drops will appear for UDP payloads exceeding the MTU.
+- If `enforcedMss=disabled`: TCP sessions are also affected — large TCP segments are
+  dropped because MSS was never negotiated down.
+- Common causes: interface `mtu=1500` on a PPPoE link (actual MTU 1492), tunnel interface
+  MTU not reduced to account for encapsulation overhead.
+- Run the ping DF binary search (see below) to confirm the effective path MTU and
+  compare against the configured interface `mtu`.
+
+**Scenario 2 — Unavoidable fragmentation (`ipv4_packets_fragmented > 0`, `ipv4_dont_fragment_drop == 0`):**
+The SSR is fragmenting non-DF packets (typically UDP). The SSR is doing all it can —
+it cannot negotiate a lower MTU for UDP traffic, so it fragments instead.
+- Report as: sub-optimal but expected. Fragmentation increases latency for latency-sensitive
+  UDP applications (VoIP, DNS, video). Recommend raising the upstream path MTU or, for
+  application control, configuring a smaller UDP packet size at the source.
+- Do not characterise this as an SSR failure or misconfiguration.
+
+**Scenario 3 — Possible downstream MTU black hole (fragmentation stats near zero):**
+A device between the SSR and the destination is silently dropping large DF-bit packets
+without sending ICMP unreachable back to the SSR. The SSR never learns of the drop.
+- Trigger: fragmentation stats are zero, but Step 5 shows link-wide retransmission
+  elevation that Step 6 cannot explain.
+- Run the ping DF binary search (see below) to confirm. If packets above a certain size
+  fail while smaller ones succeed, a downstream black hole is present.
+- If `enforcedMss=automatic` and TCP retransmissions are elevated: either the configured
+  interface `mtu` is higher than the actual path MTU (causing MSS to be clamped to the
+  wrong value), or a non-TCP protocol (e.g., UDP) is triggering the symptom.
+
+### Ping DF binary search
+
+Use `ping` with `dont_frag=True` to probe the effective path MTU toward the affected
+destination. The `size` parameter is the **payload byte count** only. The full IP packet
+size = `size + 28` (20-byte IP header + 8-byte ICMP header).
+
+Use the WAN interface's gateway address or a known far-end host as `host`. Specify the
+affected router and node.
+
+**Procedure:**
+
+1. `size=1472` → tests a 1500-byte IP packet. If `reachable=true`: path MTU ≥ 1500.
+   Unless DF-drops are already confirmed, MTU is not the problem here — stop.
+2. If `reachable=false` (or if DF-drops confirmed): bisect between 576 and 1472.
+   - Try `size=1024`. If `reachable=true`: search 1024–1472. If false: search 576–1024.
+   - Continue halving the remaining range until the passing and failing sizes differ by ≤ 10.
+3. **Effective path MTU = last passing `size` + 28.**
+
+Compare the effective path MTU against the configured `mtu` on the interface.
+A lower effective path MTU than configured `mtu` confirms the mismatch and its magnitude.
+
+## Step 8 — Report findings
 
 **Performance verdict** — state which of these best fits, with supporting data:
 - SSR is dropping sessions — specify service and likely cause (exhaustion vs policy)
 - Problem on interface `<name>` (toward server/nexthop) — retransmission evidence
 - Problem on interface `<name>` (toward client/ingress) — retransmission evidence
 - SVR peer path degraded — peer name, loss/latency/jitter
+- MTU mismatch on interface `<name>` — scenario (SSR MTU constraint / downstream black
+  hole), configured MTU vs effective path MTU from ping DF search, MSS enforcement state
+- Unavoidable UDP fragmentation on interface `<name>` — SSR fragmenting non-DF traffic;
+  sub-optimal but expected; recommend raising upstream path MTU
 - SSR forwarding plane constrained — session processor CPU or capacity pool near 100%
 - No clear SSR-side signal — problem may be external; describe what was checked
 
