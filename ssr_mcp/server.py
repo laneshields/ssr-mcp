@@ -1842,6 +1842,8 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                     "tenants": set(),
                     "services": set(),
                     "next_hop_types": set(),
+                    "svr_peers": set(),
+                    "traffic_classes": set(),
                 }
 
             app = apps[name]
@@ -1866,6 +1868,10 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                 for nh in client.get("nextHopInterface") or []:
                     if nh.get("type"):
                         app["next_hop_types"].add(nh["type"])
+                    if nh.get("type") == "INTER_ROUTER" and nh.get("peerName"):
+                        app["svr_peers"].add(nh["peerName"])
+                    if nh.get("trafficClass"):
+                        app["traffic_classes"].add(nh["trafficClass"])
                     nh_rx += nh.get("rxBytes") or 0
                     nh_tx += nh.get("txBytes") or 0
                     tcp["tcp_retrans_from_server"] += nh.get("tcpRetransmissionPacketsFromServer") or 0
@@ -1934,6 +1940,8 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
             "tenants": sorted(app["tenants"]),
             "services": sorted(app["services"]),
             "next_hop_types": sorted(app["next_hop_types"]),
+            "svr_peers": sorted(app["svr_peers"]),
+            "traffic_classes": sorted(app["traffic_classes"]),
             "rx_bytes": total_rx,
             "tx_bytes": total_tx,
             "rx_packets": tcp_totals["rx_packets"],
@@ -2005,6 +2013,9 @@ async def get_application_series(
     services field maps each application to the SSR service(s) handling it —
     use with list_service_paths to check path health and SVR vs IP forwarding.
     next_hop_types: PUBLIC = plain IP forwarding; INTER_ROUTER = SVR peer path.
+    svr_peers: router names of SVR peers carrying this application's traffic —
+    use with list_peer_paths to check that specific peer's path health.
+    traffic_classes: SSR traffic classes (high/medium/low/best-effort) in use.
 
     Args:
         router:         Router name (required).
