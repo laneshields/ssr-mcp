@@ -2163,23 +2163,34 @@ async def query_stats(
 async def get_fragmentation_stats(router: str) -> str:
     """Get IP fragmentation and reassembly counters for a router.
 
-    Use when investigating MTU/MSS-related slowness or packet loss. Two distinct
-    failure modes:
+    Use when investigating MTU/MSS-related slowness or packet loss. Three scenarios:
 
     1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop non-zero):
        A DF-set packet arrived that exceeded the SSR's configured egress interface
-       MTU. The SSR dropped it and sent ICMP Fragmentation Needed. Fix: lower the
-       interface MTU config or adjust the upstream sender's MSS.
+       MTU. The SSR dropped it and sent ICMP Fragmentation Needed. The sender
+       will not reduce its packet size unless it processes that ICMP. This is a
+       problem that needs fixing: lower the interface MTU config or the upstream
+       sender's MSS.
 
-    2. Downstream MTU mismatch (all counters zero, but ping DF search fails):
+    2. SSR is fragmenting non-DF traffic (sent.ipv4_packets_fragmented non-zero,
+       ipv4_dont_fragment_drop zero):
+       The SSR is fragmenting packets that arrived without DF set — typically UDP
+       from LAN hosts whose MTU exceeds the WAN interface MTU (e.g. LAN=1500,
+       WAN=1492). The SSR is doing all it can: TCP is protected by enforcedMss,
+       but UDP has no MSS negotiation. Report this as sub-optimal but expected —
+       the SSR cannot avoid fragmenting these packets. The user's options are to
+       lower the LAN MTU, configure UDP-sending applications to use smaller
+       payloads, or accept the fragmentation overhead.
+
+    3. Downstream MTU mismatch (all counters zero, but ping DF search fails):
        The SSR's configured MTU is optimistic — a downstream hop silently drops
        oversized packets without the SSR knowing. These counters do NOT fire for
        this case. Use ping with dont_frag=True + binary search on packet size to
        detect and confirm.
 
     Key counters:
-      sent.ipv4_dont_fragment_drop   — SSR dropped DF-set packet (SSR is constraint)
-      sent.ipv4_packets_fragmented   — SSR fragmented a packet (DF not set)
+      sent.ipv4_dont_fragment_drop   — SSR dropped DF-set packet (always a problem)
+      sent.ipv4_packets_fragmented   — SSR fragmented a packet (DF not set; may be expected)
       sent.ipv4_non_fabric_fragments — fragments on standard IP-routed paths
       sent.ipv4_fabric_fragments     — fragments on SVR paths
       received.successfully_reassembled   — fragmented traffic arriving at SSR
