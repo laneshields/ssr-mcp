@@ -2175,6 +2175,12 @@ async def query_stats(
 async def get_fragmentation_stats(router: str) -> str:
     """Get IP fragmentation and reassembly counters for a router.
 
+    IMPORTANT: all counters are cumulative and never reset. A non-zero value means
+    the event has occurred at some point since the last process restart — it does NOT
+    mean fragmentation is happening right now. To determine whether fragmentation is
+    active, call this tool twice with a ~30-second gap and compare values. Only
+    counters that increased between calls indicate a current problem.
+
     Use when investigating MTU/MSS-related slowness or packet loss. Three scenarios:
 
     1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop non-zero):
@@ -3261,12 +3267,20 @@ Then call `get_bgp_summary` (router + node) **if BGP is configured**:
     clients, or NAT state issues). Not a link-quality problem.
   - Those stats near zero → RSTs from policy enforcement, capacity, or access control.
 - Fragmentation (`get_fragmentation_stats`):
-  - `sent.ipv4_dont_fragment_drop > 0` → SSR received a DF-bit packet too large for
-    the outbound interface MTU and had to drop it. Always a misconfiguration. Carry
+  **These are cumulative counters that only ever increase — a non-zero value does not
+  mean fragmentation is happening right now.** Before drawing any conclusion, call
+  `get_fragmentation_stats` a second time after a 30-second pause and compare the
+  values. Only counters that increased between the two calls indicate active
+  fragmentation at this moment. If you cannot wait, note the uncertainty explicitly.
+  - `sent.ipv4_dont_fragment_drop` actively incrementing → SSR is currently dropping
+    DF-set packets too large for the outbound MTU. Always a misconfiguration. Carry
     forward to Step 7.
-  - `sent.ipv4_packets_fragmented > 0` → SSR is fragmenting non-DF packets (typically
-    UDP). Sub-optimal but expected SSR behaviour. Carry forward to Step 7.
-  - All zeros → no fragmentation events at this moment. A downstream MTU black hole
+  - `sent.ipv4_packets_fragmented` actively incrementing → SSR is currently
+    fragmenting non-DF packets (typically UDP). Sub-optimal but expected SSR
+    behaviour. Carry forward to Step 7.
+  - Counters non-zero but not increasing → historical events; not an active problem.
+    Note the totals but do not carry forward to Step 7.
+  - All zeros → no fragmentation events ever recorded. A downstream MTU black hole
     is still possible; investigate in Step 7 only if Step 5 reveals link-wide
     retransmissions that Step 6 cannot explain.
 
