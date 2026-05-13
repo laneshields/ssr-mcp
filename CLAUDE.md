@@ -238,6 +238,30 @@ Understanding how packets are processed helps interpret tool output correctly.
 - Domain name → `app_id_lookup` domain mode (requires `has_http_https`)
 - All else fails → `get_dropped_packets`
 
+## Metric interpretation
+
+SSR metrics fall into two fundamentally different types. Using the wrong approach
+risks alarming on transient spikes or missing real problems.
+
+**Cumulative counters** — values that only ever increase (dropped packets, TCP
+retransmissions, fragmentation events, error counts). The raw value is meaningless
+in isolation — a large number may have accumulated over months. Use `query_metrics`
+with `counter=True` and check `total_change` over a window (default 30 minutes).
+Zero means no events in that period regardless of the historical total. Non-zero
+means the condition is active right now.
+
+**Gauge time-series** — values that fluctuate over time (CPU%, memory%, session
+count, bandwidth). A single point-in-time reading cannot distinguish a momentary
+spike from sustained load. Use `query_metrics` with `counter=False` (default) and
+compare `avg` against `current` over a 30-minute window:
+- `current` >> `avg`: transient spike at query time; not necessarily a problem.
+- `current` ≈ `avg` and both high: sustained load; treat as a real issue.
+- `trend = "decreasing"`: condition was worse earlier; may be self-resolving.
+
+**Rule:** when a point-in-time tool flags something high (`cpu_high`, a large
+counter value, a "High" state), use `query_metrics` to confirm whether it is
+sustained or historical before treating it as a confirmed problem.
+
 ## Adding a new tool
 
 1. Add a method to `SSRClient` in `client.py`.

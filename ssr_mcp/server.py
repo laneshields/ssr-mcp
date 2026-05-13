@@ -2234,14 +2234,19 @@ async def query_metrics(
     Two modes depending on the metric type:
 
     Gauge metrics (counter=False, default): values that go up and down —
-    session count, bandwidth. Summary reports current/min/max/average of
-    the raw values.
+    CPU%, session count, bandwidth. Summary reports current/min/max/average
+    of the raw values. Use avg to distinguish sustained load from transient
+    spikes: if current >> avg the reading is a spike; if current ≈ avg and
+    both are high the load is sustained and worth acting on.
 
     Counter metrics (counter=True): values that only ever increase — bytes
-    transmitted, packets dropped, TCP retransmissions. Summary reports the
-    rate of change between samples (current rate, avg rate, max rate, total
-    change over the window). Counter resets (e.g. after a reboot) are treated
-    as zero rather than negative spikes.
+    transmitted, packets dropped, TCP retransmissions, fragmentation events.
+    Summary reports the rate of change between samples (current rate, avg
+    rate, max rate, total change over the window). Use total_change to
+    determine whether the condition is active: zero means no events in the
+    window regardless of the all-time total; non-zero means it is happening
+    now. Counter resets (e.g. after a reboot) are treated as zero rather
+    than negative spikes.
 
     Known metric IDs:
       /stats/aggregate-session/node/session-count  — gauge  (unit: 'count')
@@ -3094,12 +3099,19 @@ Otherwise flag any entry not in `CONNECTED` state. For each flagged entry identi
 whether it is a conductor link (management plane) or an HA node-to-node link.
 
 ### Node Resources
-CPU, memory, and disk per node. Flag `cpu_high: true` (≥90%) and `disk_high: true`
-(≥85%) prominently.
+CPU, memory, and disk per node. If `cpu_high: true` (≥90%), use `query_metrics`
+(counter=False, window_seconds=1800) on the relevant CPU stat to verify the load
+is sustained before flagging it as critical — compare `avg` vs `current`. If avg
+is also high, report as sustained high CPU. If avg is low, note it as a transient
+spike and do not alarm. Flag `disk_high: true` (≥85%) prominently without
+needing trend confirmation (disk usage does not spike transiently).
 
 ### Service Area
-`get_session_processor_utilization` state (`Normal`/`High`) and per-thread CPU.
-Flag `High` prominently.
+`get_session_processor_utilization` state and per-thread CPU. If state is `High`
+or any thread CPU is elevated, use `query_metrics` (counter=False, window_seconds=1800)
+on the session processor CPU to confirm the load is sustained before flagging it
+as critical. Sustained High service area CPU causes session drops and is a serious
+finding; a transient spike is not.
 
 ### Capacity Pools
 Utilization for FIB_TABLE, FLOW_TABLE, ACTION_POOL, SOURCE_TENANT_TABLE, and
@@ -3205,12 +3217,18 @@ Call **in parallel** (router + node):
 - `get_waypoint_utilization` — waypoint port pool (skip silently if `available: false`)
 
 **Interpret:**
-- `get_session_processor_utilization`: if any thread shows `state != "Normal"` or
-  CPU sustained above 80%, the SSR's forwarding plane is under pressure. Note it and
-  continue — the SSR may still be showing application symptoms worth investigating.
+- `get_session_processor_utilization`: if state is `High` or any thread CPU is
+  elevated, use `query_metrics` (counter=False, window_seconds=1800) on the session
+  processor CPU threads to confirm the load is sustained. Compare `avg` vs `current`:
+  sustained high (avg also high) means the forwarding plane is genuinely under
+  pressure and is a likely cause of slowness; a transient spike is not. Note and
+  continue regardless — the SSR may still be showing application symptoms worth
+  investigating.
 - `get_capacity`: pool exhaustion causes session drops, not gradual slowness — only
   flag if a pool is at or very near 100%. Redirect to `health_check` if so.
-- `get_node_utilization`: flag `cpu_high` and `disk_high` if set.
+- `get_node_utilization`: if `cpu_high` is set, use `query_metrics` (counter=False,
+  window_seconds=1800) to confirm it is sustained before treating it as a contributing
+  factor. Flag `disk_high` without trend confirmation needed.
 - Source NAT / waypoint pools: port exhaustion causes failed or hanging sessions
   that can appear as intermittent slowness. Flag if pool is exhausted.
 
