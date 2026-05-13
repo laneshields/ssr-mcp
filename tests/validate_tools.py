@@ -645,6 +645,58 @@ async def test_get_application_series(c: SSRClient, ctx: TestContext):
     r = await c.get_application_series(ctx.router, ctx.node, window_minutes=5)
     assert isinstance(r, (list, dict))
 
+@register(requires=["has_http_https"])
+async def test_summarize_app_series_fields(c: SSRClient, ctx: TestContext):
+    """Verify _summarize_app_series produces correct fields on real data."""
+    from ssr_mcp.server import _summarize_app_series
+    buckets = await c.get_application_series(ctx.router, ctx.node, window_minutes=5)
+    summary = _summarize_app_series(buckets)
+    assert isinstance(summary, list)
+    if not summary:
+        raise _SkipTest("no application data in window")
+    app = summary[0]
+    # active_sessions must be present — was always 0 (bug) before fix
+    assert "active_sessions" in app, "active_sessions missing from summary"
+    # RTT fields must be present (None is acceptable if no TCP data)
+    assert "avg_fwd_rtt_ms" in app, "avg_fwd_rtt_ms missing from summary"
+    assert "avg_rev_rtt_ms" in app, "avg_rev_rtt_ms missing from summary"
+    assert "avg_tcp_connection_ms" in app, "avg_tcp_connection_ms missing from summary"
+    # active_sessions should not be universally 0 when there is traffic
+    total_sessions = sum(a["active_sessions"] for a in summary)
+    new_sessions = sum(a["new_sessions"] for a in summary)
+    assert total_sessions > 0 or new_sessions > 0, (
+        f"active_sessions={total_sessions} and new_sessions={new_sessions} — "
+        "expected at least some session activity with app-id traffic present"
+    )
+
+@register(requires=["has_http_https"])
+async def test_get_top_applications(c: SSRClient, ctx: TestContext):
+    with _inject_client(c):
+        result = json.loads(await _server.get_top_applications(
+            router=ctx.router, node=ctx.node, top_n=5, window_minutes=5
+        ))
+    assert "applications" in result
+    assert "total_applications" in result
+    assert len(result["applications"]) <= 5
+    if result["applications"]:
+        app = result["applications"][0]
+        for field in ("name", "rx_bytes", "tx_bytes", "active_sessions", "unique_clients"):
+            assert field in app, f"get_top_applications missing field: {field}"
+
+@register(requires=["has_http_https"])
+async def test_get_application_tcp_health(c: SSRClient, ctx: TestContext):
+    with _inject_client(c):
+        result = json.loads(await _server.get_application_tcp_health(
+            router=ctx.router, node=ctx.node, window_minutes=5, min_sessions=1
+        ))
+    assert "applications" in result
+    assert "application_count" in result
+    if result["applications"]:
+        app = result["applications"][0]
+        for field in ("name", "tcp_retrans_from_server_pct", "tcp_retrans_from_client_pct",
+                      "avg_tcp_connection_ms", "avg_fwd_rtt_ms", "avg_rev_rtt_ms"):
+            assert field in app, f"get_application_tcp_health missing field: {field}"
+
 # ---------------------------------------------------------------------------
 # Tests — IDP
 # ---------------------------------------------------------------------------

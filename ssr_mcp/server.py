@@ -1809,26 +1809,29 @@ async def get_running_config(router: str | None = None) -> str:
 def _summarize_app_series(buckets: list, application: str | None = None) -> list:
     """Aggregate application series buckets into a per-application summary.
 
-    When IDP is active, SSR uses service function chaining: traffic flows
-    LAN → SSR → idp-in (to IDP engine) → idp-out → SSR → WAN. The SSR
-    tracks two separate sessions for this path, so the same client address
-    appears twice per bucket in the raw data — once under the base service
-    (IDP→WAN leg) and once under the *-idp* variant (LAN→IDP leg). Both
-    legs carry the same packets, so naively summing would double every metric.
+    All metrics live at the nextHopInterface level in the raw API (without
+    roll-up-metrics). Client objects carry only failedSessions; application
+    objects carry no metrics at all. activeSessions is therefore read from
+    nexthops, not from the client object.
 
-    All per-client metrics therefore use max() across appearances of the same
-    address within each bucket. A side effect of max() is that the output
-    values reflect the peak single-interval observation for each client rather
-    than a window total. The retransmission *rate* (pct fields) is unaffected
-    because numerator and denominator use the same max basis.
+    IDP dedup: when IDP service function chaining is active, the same client
+    IP can appear under two different ingressIntf values (the true dedup key
+    is clientIp + networkInterface). We dedup by address only via max(), which
+    is correct for the IDP case (both entries represent the same session) but
+    would merge a legitimately multi-homed client into one row.
 
     Localization semantics for TCP fields:
       tcp_retrans_from_server + dup_acks_fwd high → WAN downlink loss (server→client)
       tcp_retrans_from_client + dup_acks_rev high → LAN or uplink loss (client→server)
       ssr_retrans_to_* non-zero                   → SSR itself is retransmitting
+      avg_fwd_rtt_ms high                         → WAN latency (client→server RTT)
+      avg_rev_rtt_ms high                         → reverse-path latency (server→client RTT)
     """
-    # Metrics read from the nextHopInterface level and deduped via max() per client addr.
+    # All metrics read from the nextHopInterface level, deduped via max() per client addr.
+    # Intermediate accumulator keys (ttfp_*, rtt_*) are used to compute averages and
+    # are not included in the final result dict.
     _TCP_KEYS = (
+        "active_sessions",
         "tcp_retrans_from_server",
         "tcp_retrans_from_client",
         "ssr_retrans_to_client",
@@ -1841,8 +1844,12 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
         "new_sessions",
         "rx_packets",
         "tx_packets",
-        "ttfp_tcp_total_ms",
-        "ttfp_tcp_count",
+        "ttfp_total_ms",
+        "ttfp_count",
+        "fwd_rtt_total_ms",
+        "fwd_rtt_count",
+        "rev_rtt_total_ms",
+        "rev_rtt_count",
     )
     # failed_sessions is at the client level (sessions dropped before nexthop assignment),
     # not the nexthop level where it is always 0. Tracked separately.
@@ -1861,7 +1868,7 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                     "name": name,
                     "type": entry.get("type"),
                     "category": entry.get("category"),
-                    "client_stats": {},  # addr -> {rx, tx, sessions, tcp...}
+                    "client_stats": {},  # addr -> {rx, tx, tcp...}
                     "tenants": set(),
                     "services": set(),
                     "next_hop_types": set(),
@@ -1882,7 +1889,6 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                 client_vals: dict[str, int] = {
                     "failed_sessions": client.get("failedSessions") or 0,
                 }
-                active = client.get("activeSessions") or 0
 
                 # Sum nexthop-level metrics across all nexthops for this appearance.
                 nh_rx = nh_tx = 0
@@ -1897,6 +1903,7 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                         app["traffic_classes"].add(nh["trafficClass"])
                     nh_rx += nh.get("rxBytes") or 0
                     nh_tx += nh.get("txBytes") or 0
+                    tcp["active_sessions"] += nh.get("activeSessions") or 0
                     tcp["tcp_retrans_from_server"] += nh.get("tcpRetransmissionPacketsFromServer") or 0
                     tcp["tcp_retrans_from_client"] += nh.get("tcpRetransmissionPacketsFromClient") or 0
                     tcp["ssr_retrans_to_client"] += nh.get("ssrInitiatedTcpRetransmissionPacketsToClient") or 0
@@ -1914,22 +1921,33 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
                     tcp["new_sessions"] += nh.get("newSessions") or 0
                     tcp["rx_packets"] += nh.get("rxPackets") or 0
                     tcp["tx_packets"] += nh.get("txPackets") or 0
+                    # TTFP: aggregate TCP and TLS keys (TLS uses its own key, not "TCP")
                     ttfp = nh.get("timeToFirstDataPacketMs")
-                    if isinstance(ttfp, dict) and "TCP" in ttfp:
-                        tcp["ttfp_tcp_total_ms"] += ttfp["TCP"].get("total") or 0
-                        tcp["ttfp_tcp_count"] += ttfp["TCP"].get("count") or 0
+                    if isinstance(ttfp, dict):
+                        for proto in ("TCP", "TLS"):
+                            if proto in ttfp:
+                                tcp["ttfp_total_ms"] += ttfp[proto].get("total") or 0
+                                tcp["ttfp_count"] += ttfp[proto].get("count") or 0
+                    # RTT: fwdTcpAckRttMs / revTcpAckRttMs use hardcoded "TCP" key for both TCP and TLS
+                    fwd_rtt = nh.get("fwdTcpAckRttMs")
+                    if isinstance(fwd_rtt, dict) and "TCP" in fwd_rtt:
+                        tcp["fwd_rtt_total_ms"] += fwd_rtt["TCP"].get("total") or 0
+                        tcp["fwd_rtt_count"] += fwd_rtt["TCP"].get("count") or 0
+                    rev_rtt = nh.get("revTcpAckRttMs")
+                    if isinstance(rev_rtt, dict) and "TCP" in rev_rtt:
+                        tcp["rev_rtt_total_ms"] += rev_rtt["TCP"].get("total") or 0
+                        tcp["rev_rtt_count"] += rev_rtt["TCP"].get("count") or 0
 
                 # max() across appearances of the same addr (IDP dedup + bucket dedup)
                 if addr not in app["client_stats"]:
                     app["client_stats"][addr] = {
-                        "rx": nh_rx, "tx": nh_tx, "sessions": active,
+                        "rx": nh_rx, "tx": nh_tx,
                         **tcp, **client_vals,
                     }
                 else:
                     s = app["client_stats"][addr]
                     s["rx"] = max(s["rx"], nh_rx)
                     s["tx"] = max(s["tx"], nh_tx)
-                    s["sessions"] = max(s["sessions"], active)
                     for k in _TCP_KEYS:
                         s[k] = max(s[k], tcp[k])
                     for k in _CLIENT_KEYS:
@@ -1940,22 +1958,28 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
         clients = app["client_stats"]
         total_rx = sum(c["rx"] for c in clients.values())
         total_tx = sum(c["tx"] for c in clients.values())
-        total_sessions = sum(c["sessions"] for c in clients.values())
         # Sum deduplicated per-client totals across all clients
         all_keys = _TCP_KEYS + _CLIENT_KEYS
         tcp_totals: dict[str, int] = {k: sum(c[k] for c in clients.values()) for k in all_keys}
         total_pkts = tcp_totals["rx_packets"] + tcp_totals["tx_packets"]
-        ttfp_ms = (
-            round(tcp_totals["ttfp_tcp_total_ms"] / tcp_totals["ttfp_tcp_count"])
-            if tcp_totals["ttfp_tcp_count"]
-            else None
+        avg_ttfp_ms = (
+            round(tcp_totals["ttfp_total_ms"] / tcp_totals["ttfp_count"])
+            if tcp_totals["ttfp_count"] else None
+        )
+        avg_fwd_rtt_ms = (
+            round(tcp_totals["fwd_rtt_total_ms"] / tcp_totals["fwd_rtt_count"])
+            if tcp_totals["fwd_rtt_count"] else None
+        )
+        avg_rev_rtt_ms = (
+            round(tcp_totals["rev_rtt_total_ms"] / tcp_totals["rev_rtt_count"])
+            if tcp_totals["rev_rtt_count"] else None
         )
 
         result.append({
             "name": app["name"],
             "type": app["type"],
             "category": app["category"],
-            "active_sessions": total_sessions,
+            "active_sessions": tcp_totals["active_sessions"],
             "new_sessions": tcp_totals["new_sessions"],
             "failed_sessions": tcp_totals["failed_sessions"],
             "unique_clients": len(clients),
@@ -1980,7 +2004,9 @@ def _summarize_app_series(buckets: list, application: str | None = None) -> list
             "out_of_window_fwd": tcp_totals["out_of_window_fwd"],
             "out_of_window_rev": tcp_totals["out_of_window_rev"],
             "tcp_resets": tcp_totals["tcp_resets"],
-            "avg_tcp_connection_ms": ttfp_ms,
+            "avg_tcp_connection_ms": avg_ttfp_ms,
+            "avg_fwd_rtt_ms": avg_fwd_rtt_ms,
+            "avg_rev_rtt_ms": avg_rev_rtt_ms,
         })
 
     return sorted(result, key=lambda x: x["rx_bytes"] + x["tx_bytes"], reverse=True)
@@ -1994,23 +2020,21 @@ async def get_application_series(
     application: str | None = None,
     summarize: bool = True,
 ) -> str:
-    """Get per-application traffic data for a router node — which applications
-    (YouTube, Zoom, Teams, etc.) are active, by which clients, and over which
-    WAN path types (PUBLIC/INTER_ROUTER).
+    """Get full per-application traffic data including client IPs, tenants, and
+    path detail for a router node.
 
     Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
 
-    Use this when list_services shows a broad service like 'internet' carrying
-    significant traffic and you need to know which specific applications are
-    responsible. list_services answers "what services?" — this answers "what
-    apps within those services?"
+    Prefer the focused tools for common cases — they call the same API but
+    return only what's needed:
+      get_top_applications     — "what's using my bandwidth?" (compact, top-N)
+      get_application_tcp_health — "what's slow or lossy?" (TCP health metrics only)
 
-    The raw API is extremely verbose (per-client, per-nexthop stats across
-    multiple time buckets). Use summarize=True (default) for a clean
-    per-application summary: client IPs, tenants, services in use, WAN path
-    types, rx/tx byte totals, and TCP health metrics.
+    Use this tool when you need per-client detail: which specific IPs are using
+    an application, which tenants, which SVR peers, or which services — typically
+    after get_top_applications or get_application_tcp_health identifies a suspect.
 
-    Use summarize=False only when you need per-client or per-nexthop detail
+    Use summarize=False only when you need raw per-nexthop time-bucketed data
     for a specific flow investigation — combine with the application filter
     to keep the response manageable.
 
@@ -2073,6 +2097,143 @@ async def get_application_series(
             "bucket_count": len(buckets),
             "application_count": len(summary),
             "applications": summary,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def get_top_applications(
+    router: str,
+    node: str,
+    top_n: int = 10,
+    window_minutes: int = 30,
+) -> str:
+    """Get the top N applications by traffic volume for a router node.
+
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
+    Returns a compact summary (name, bytes, sessions, services, path types) for
+    the highest-bandwidth applications. Use this as the first step when asked
+    "what's using my bandwidth?" or when triage shows high throughput with no
+    obvious cause.
+
+    For TCP health / slow traffic: use get_application_tcp_health instead.
+    For per-client detail on a specific app: use get_application_series with
+    the application filter.
+
+    Args:
+        router:         Router name (required).
+        node:           Node name (required).
+        top_n:          Number of top applications to return, sorted by total bytes. Default 10.
+        window_minutes: Time window to query. Default 30 minutes.
+    """
+    buckets = await get_client().get_application_series(router, node, window_minutes)
+    summary = _summarize_app_series(buckets)
+    top = summary[:top_n]
+    return json.dumps(
+        {
+            "window_minutes": window_minutes,
+            "showing": len(top),
+            "total_applications": len(summary),
+            "applications": [
+                {
+                    "name": app["name"],
+                    "category": app["category"],
+                    "rx_bytes": app["rx_bytes"],
+                    "tx_bytes": app["tx_bytes"],
+                    "active_sessions": app["active_sessions"],
+                    "unique_clients": app["unique_clients"],
+                    "services": app["services"],
+                    "next_hop_types": app["next_hop_types"],
+                }
+                for app in top
+            ],
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def get_application_tcp_health(
+    router: str,
+    node: str,
+    window_minutes: int = 30,
+    min_sessions: int = 5,
+) -> str:
+    """Get TCP health metrics for active applications, sorted by worst retransmission rate.
+
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
+    Use this when traffic is reported as slow, laggy, or lossy with no specific
+    application or client identified. Returns retransmissions, duplicate ACKs,
+    out-of-window events, resets, connection time, and RTT — the signals that
+    distinguish WAN loss, uplink loss, and SSR-induced retransmissions.
+
+    Applications with fewer than min_sessions (new + active) are excluded as
+    noise. Results are sorted worst-first by total retransmission rate.
+
+    Interpretation:
+      tcp_retrans_from_server_pct high → loss on WAN downlink (server→client)
+      tcp_retrans_from_client_pct high → loss on LAN or uplink (client→server)
+      ssr_retrans_to_* non-zero        → SSR itself is retransmitting (bottleneck)
+      avg_fwd_rtt_ms high              → WAN latency to server
+      avg_rev_rtt_ms high              → reverse-path latency
+
+    For bandwidth analysis: use get_top_applications instead.
+    For per-client detail on a specific app: use get_application_series with
+    the application filter.
+
+    Args:
+        router:         Router name (required).
+        node:           Node name (required).
+        window_minutes: Time window to query. Default 30 minutes.
+        min_sessions:   Minimum new+active sessions to include an application. Default 5.
+    """
+    buckets = await get_client().get_application_series(router, node, window_minutes)
+    summary = _summarize_app_series(buckets)
+
+    active = [
+        a for a in summary
+        if (a["new_sessions"] + a["active_sessions"]) >= min_sessions
+    ]
+
+    def retrans_rate(app: dict) -> float:
+        total_pkts = app["rx_packets"] + app["tx_packets"]
+        if not total_pkts:
+            return 0.0
+        return (app["tcp_retrans_from_server"] + app["tcp_retrans_from_client"]) / total_pkts
+
+    active.sort(key=retrans_rate, reverse=True)
+
+    return json.dumps(
+        {
+            "window_minutes": window_minutes,
+            "application_count": len(active),
+            "applications": [
+                {
+                    "name": app["name"],
+                    "category": app["category"],
+                    "active_sessions": app["active_sessions"],
+                    "new_sessions": app["new_sessions"],
+                    "failed_sessions": app["failed_sessions"],
+                    "tcp_retrans_from_server": app["tcp_retrans_from_server"],
+                    "tcp_retrans_from_server_pct": app["tcp_retrans_from_server_pct"],
+                    "tcp_retrans_from_client": app["tcp_retrans_from_client"],
+                    "tcp_retrans_from_client_pct": app["tcp_retrans_from_client_pct"],
+                    "ssr_retrans_to_client": app["ssr_retrans_to_client"],
+                    "ssr_retrans_to_server": app["ssr_retrans_to_server"],
+                    "dup_acks_fwd": app["dup_acks_fwd"],
+                    "dup_acks_rev": app["dup_acks_rev"],
+                    "out_of_window_fwd": app["out_of_window_fwd"],
+                    "out_of_window_rev": app["out_of_window_rev"],
+                    "tcp_resets": app["tcp_resets"],
+                    "avg_tcp_connection_ms": app["avg_tcp_connection_ms"],
+                    "avg_fwd_rtt_ms": app["avg_fwd_rtt_ms"],
+                    "avg_rev_rtt_ms": app["avg_rev_rtt_ms"],
+                }
+                for app in active
+            ],
         },
         indent=2,
     )
