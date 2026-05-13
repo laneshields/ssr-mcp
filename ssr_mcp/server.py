@@ -3758,10 +3758,14 @@ if they add noise; include all named interfaces that carry tenant traffic):
 ### Connected Clients
 
 Merge `get_dhcp_leases` and `get_arp` into a single table. For each unique IP:
-- If the IP appears in both sources, combine into one row (DHCP wins for hostname;
-  ARP provides the interface name).
+- If the IP appears in both sources, combine into one row (DHCP wins for hostname
+  and interface name; ARP contributes the MAC if DHCP doesn't have one).
 - If the IP appears only in DHCP, mark source as `DHCP`.
-- If the IP appears only in ARP, mark source as `ARP`.
+- If the IP appears only in ARP, mark source as `ARP`. For ARP-only rows, resolve
+  the interface by matching the ARP entry's `deviceInterface` and `vlan` against
+  `get_network_interfaces` data (already fetched in Step 4): find the network
+  interface whose `deviceInterface.name` matches and whose `vlan` matches — use
+  that network interface's name. If no match, fall back to `deviceInterface (VLAN X)`.
 
 | IP | MAC | Hostname | Interface | Source |
 |----|-----|----------|-----------|--------|
