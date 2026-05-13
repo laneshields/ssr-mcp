@@ -3598,9 +3598,13 @@ be configured at the network-interface level instead (rare but valid).
   all traffic equally rather than prioritizing by class.
 
 **Service path linkage:**
-For services carrying affected traffic, call `list_service_paths` to confirm path
-state and identify whether traffic uses SVR (`INTER_ROUTER`) or IP forwarding
-(`PUBLIC`). Proceed to Step 6 if SVR paths are in use.
+Call `list_service_paths` filtered to the service names identified in the
+drill-down results (the `services` field from `get_application_series`). Use
+the filter syntax: `'"service_name"="<name>"'`. Do NOT call `list_service_paths`
+without a filter. If multiple suspect services were identified, call once per
+service in parallel. This confirms path state and identifies whether traffic
+uses SVR (`INTER_ROUTER`) or IP forwarding (`PUBLIC`). Proceed to Step 6 if
+SVR paths are in use.
 
 For each service path, examine these fields:
 - `state` — `"Up"` or `"Down"`. A down path is not forwarding traffic.
