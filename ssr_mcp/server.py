@@ -705,6 +705,8 @@ def _extract_dhcp_leases(data: dict) -> list[dict]:
         for node in router_node.get("nodes", {}).get("nodes", []):
             for dev_iface in node.get("deviceInterfaces", {}).get("nodes", []):
                 for net_iface in (dev_iface.get("networkInterfaces") or {}).get("nodes") or []:
+                    if (net_iface.get("name") or "").startswith("dhcp-server-gen-"):
+                        continue
                     plugin_state = (net_iface.get("plugins") or {}).get("state") or {}
                     dhcp_server = plugin_state.get("dhcp-server")
                     if not dhcp_server:
@@ -3653,6 +3655,150 @@ A lower effective path MTU than configured `mtu` confirms the mismatch and its m
   and using `ping` with the DF bit at varying packet sizes to find the path MTU.
 - *Source NAT / waypoint port exhaustion*: if drops show many clients failing on
   the same service, port pool exhaustion is possible. Full API support pending.
+"""
+
+
+# ------------------------------------------------------------------
+# explore prompt
+# ------------------------------------------------------------------
+
+
+@mcp.prompt()
+def explore(router: str | None = None) -> str:
+    """Explore a site: interfaces, connected clients, BGP neighbors, SVR peers,
+    applications seen, and top sources.
+
+    Use to get a quick orientation to a router — what is connected, what is
+    running, and what traffic is flowing. Not a health check; use health_check
+    for fault triage.
+
+    Args:
+        router: Router name. In conductor mode, required. In router mode,
+            defaults to the connected router.
+    """
+    intro = (
+        f"Explore site `{router}` and produce a summary of its interfaces, "
+        "connected clients, BGP neighbors, SVR peers, applications, and top sources."
+        if router
+        else "Explore this SSR site and produce a summary of its interfaces, "
+        "connected clients, BGP neighbors, SVR peers, applications, and top sources."
+    )
+
+    router_step = (
+        f"The target router is `{router}`. Proceed directly to Step 3."
+        if router
+        else (
+            "- **conductor mode** → if no router is clear from context, ask the user "
+            "to specify one before proceeding.\n"
+            "- **router mode** → use the router and node from `get_connection_info`."
+        )
+    )
+
+    return f"""{intro}
+
+## Step 1 — Log the query
+
+Call `begin_query` with a one-sentence description (e.g. "Explore site router-X"
+or "Site overview for branch-office-01").
+
+Throughout this workflow: if any tool returns a result that looks wrong or
+inconsistent — empty fields that should have values, a response shape that
+doesn't match documented format, or data that contradicts another tool's output
+— call `report_issue` before continuing. If the user expresses dissatisfaction
+with any result, call `report_feedback` immediately.
+
+## Step 2 — Establish context
+
+Call `get_connection_info`. Note the mode, router name, and node name.
+
+{router_step}
+
+## Step 3 — Router info
+
+Call `get_router_info` for the target router. Record:
+- Node name(s) — required for all node-scoped tools below.
+- Software version.
+- Whether the router is HA (multiple nodes). For HA routers, run all
+  node-scoped tools against the **primary node only** (the first node listed).
+
+## Step 4 — Gather site data (all in parallel)
+
+Call all of the following in a single parallel batch:
+
+- `get_device_interfaces` (router + node) — physical interface link state
+- `get_network_interfaces` (router + node) — logical interfaces with IPs and tenants
+- `get_dhcp_leases` (router) — DHCP-assigned clients
+- `get_arp` (router + node) — ARP table
+- `get_bgp_neighbors` (router) — BGP neighbor details
+- `list_peer_paths` (router) — SVR peer path status
+- `get_application_names` (router) — application names seen
+- `get_top_sources` (router) — top traffic sources
+
+## Step 5 — Produce the site summary
+
+Present the following sections. Omit a section entirely if the data is empty
+or not applicable (e.g. no BGP config, no SVR peers).
+
+### Site Summary
+One line: router name, software version, single-node or HA (N nodes).
+
+### Interfaces
+
+**Physical** — table from `get_device_interfaces`:
+
+| Interface | Speed | Link |
+|-----------|-------|------|
+
+**Logical** — table from `get_network_interfaces` (skip internal/loopback types
+if they add noise; include all named interfaces that carry tenant traffic):
+
+| Interface | Address | Tenant | State |
+|-----------|---------|--------|-------|
+
+### Connected Clients
+
+Merge `get_dhcp_leases` and `get_arp` into a single table. For each unique IP:
+- If the IP appears in both sources, combine into one row (DHCP wins for hostname;
+  ARP provides the interface name).
+- If the IP appears only in DHCP, mark source as `DHCP`.
+- If the IP appears only in ARP, mark source as `ARP`.
+
+| IP | MAC | Hostname | Interface | Source |
+|----|-----|----------|-----------|--------|
+
+Show total counts beneath: e.g. "N clients (X via DHCP, Y ARP-only)".
+If the merged table exceeds 30 rows, show the first 30 and note how many were
+omitted.
+
+### BGP Neighbors
+
+Table from `get_bgp_neighbors`:
+
+| Neighbor | Peer ASN | State | Prefixes Received |
+|----------|----------|-------|-------------------|
+
+Note the total neighbor count and how many are in `Established` state.
+
+### SVR Peers
+
+Table from `list_peer_paths`:
+
+| Peer Router | Interface | Status | Latency |
+|-------------|-----------|--------|---------|
+
+Note total path count and how many are up.
+
+### Applications Seen
+
+Bullet list of application names from `get_application_names`. If the list
+exceeds 20 entries, show the first 20 and note the total count.
+
+### Top Sources
+
+Table from `get_top_sources`:
+
+| Source IP | Tenant | Sessions | Bytes |
+|-----------|--------|----------|-------|
 """
 
 
