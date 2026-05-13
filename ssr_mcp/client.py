@@ -2084,7 +2084,7 @@ class SSRClient:
 
         return {"events": events, "skipped_count": skipped_count}
 
-    async def get_fragmentation_stats(self, router: str) -> dict:
+    async def get_fragmentation_stats(self, router: str, window_minutes: int = 30) -> dict:
         base = "/stats/packet-processing/fragmentation"
         stat_keys = [
             ("sent", "ipv4-dont-fragment-drop"),
@@ -2095,26 +2095,56 @@ class SSRClient:
             ("received", "fragment-chains-timeout"),
             ("received", "failure-to-reassemble"),
         ]
+        window_seconds = window_minutes * 60
 
-        async def fetch(direction: str, name: str) -> tuple[str, str, int]:
-            result = await self.query_stats(router, f"{base}/{direction}/{name}")
-            value = 0
-            if result and result[0].get("permutations"):
-                value = int(result[0]["permutations"][0].get("value") or 0)
-            return direction, name, value
+        async def fetch(direction: str, name: str) -> tuple[str, str, dict]:
+            series = await self.query_metrics(router, f"{base}/{direction}/{name}", window_seconds)
+            valid = [p["value"] for p in series if "value" in p]
+
+            if not valid:
+                return direction, name, {"total_change": 0, "current_rate": 0.0, "avg_rate": 0.0, "max_rate": 0.0, "trend": "unknown"}
+
+            interval = window_seconds / len(valid) if len(valid) > 1 else window_seconds
+            deltas = [max(0, valid[i] - valid[i + 1]) for i in range(len(valid) - 1)]
+
+            current_rate = round(deltas[0] / interval, 2) if deltas else 0.0
+            avg_rate = round(sum(deltas) / len(deltas) / interval, 2) if deltas else 0.0
+            max_rate = round(max(deltas) / interval, 2) if deltas else 0.0
+            total_change = valid[0] - valid[-1]
+
+            trend = "unknown"
+            if len(deltas) >= 4:
+                quarter = max(1, len(deltas) // 4)
+                recent_avg = sum(deltas[:quarter]) / quarter
+                old_avg = sum(deltas[-quarter:]) / quarter
+                threshold = old_avg * 0.1 if old_avg else 1
+                if recent_avg - old_avg > threshold:
+                    trend = "increasing"
+                elif old_avg - recent_avg > threshold:
+                    trend = "decreasing"
+                else:
+                    trend = "stable"
+
+            return direction, name, {
+                "total_change": total_change,
+                "current_rate": current_rate,
+                "avg_rate": avg_rate,
+                "max_rate": max_rate,
+                "trend": trend,
+            }
 
         results = await asyncio.gather(*[fetch(d, n) for d, n in stat_keys])
 
-        sent: dict[str, int] = {}
-        received: dict[str, int] = {}
-        for direction, name, value in results:
+        sent: dict[str, dict] = {}
+        received: dict[str, dict] = {}
+        for direction, name, stats in results:
             key = name.replace("-", "_")
             if direction == "sent":
-                sent[key] = value
+                sent[key] = stats
             else:
-                received[key] = value
+                received[key] = stats
 
-        return {"sent": sent, "received": received}
+        return {"window_minutes": window_minutes, "sent": sent, "received": received}
 
     # ------------------------------------------------------------------
     # Node utilization

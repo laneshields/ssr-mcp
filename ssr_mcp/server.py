@@ -2172,53 +2172,46 @@ async def query_stats(
 
 
 @mcp.tool()
-async def get_fragmentation_stats(router: str) -> str:
-    """Get IP fragmentation and reassembly counters for a router.
+async def get_fragmentation_stats(router: str, window_minutes: int = 30) -> str:
+    """Get IP fragmentation and reassembly activity for a router over a time window.
 
-    IMPORTANT: all counters are cumulative and never reset. A non-zero value means
-    the event has occurred at some point since the last process restart — it does NOT
-    mean fragmentation is happening right now. To determine whether fragmentation is
-    active, call this tool twice with a ~30-second gap and compare values. Only
-    counters that increased between calls indicate a current problem.
+    Reports the delta (total_change) for each counter over the window — not the
+    cumulative all-time total. total_change = 0 means no events in that period
+    regardless of historical totals. Each counter also includes current_rate,
+    avg_rate, max_rate (events/second), and trend.
 
     Use when investigating MTU/MSS-related slowness or packet loss. Three scenarios:
 
-    1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop non-zero):
-       A DF-set packet arrived that exceeded the SSR's configured egress interface
-       MTU. The SSR dropped it and sent ICMP Fragmentation Needed. The sender
-       will not reduce its packet size unless it processes that ICMP. This is a
-       problem that needs fixing: lower the interface MTU config or the upstream
-       sender's MSS.
+    1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop.total_change > 0):
+       DF-set packets arrived that exceeded the SSR's egress interface MTU. The SSR
+       dropped them and sent ICMP Fragmentation Needed. Always a misconfiguration —
+       lower the interface MTU config or the upstream sender's MSS.
 
-    2. SSR is fragmenting non-DF traffic (sent.ipv4_packets_fragmented non-zero,
-       ipv4_dont_fragment_drop zero):
-       The SSR is fragmenting packets that arrived without DF set — typically UDP
-       from LAN hosts whose MTU exceeds the WAN interface MTU (e.g. LAN=1500,
-       WAN=1492). The SSR is doing all it can: TCP is protected by enforcedMss,
-       but UDP has no MSS negotiation. Report this as sub-optimal but expected —
-       the SSR cannot avoid fragmenting these packets. The user's options are to
-       lower the LAN MTU, configure UDP-sending applications to use smaller
-       payloads, or accept the fragmentation overhead.
+    2. SSR is fragmenting non-DF traffic (sent.ipv4_packets_fragmented.total_change > 0,
+       ipv4_dont_fragment_drop.total_change = 0):
+       The SSR is fragmenting packets without DF set — typically UDP from LAN hosts
+       whose MTU exceeds the WAN interface MTU (e.g. LAN=1500, WAN=1492). Sub-optimal
+       but expected; TCP is protected by enforcedMss, UDP has no MSS negotiation.
 
-    3. Downstream MTU mismatch (all counters zero, but ping DF search fails):
+    3. Downstream MTU mismatch (all total_change = 0, but ping DF search fails):
        The SSR's configured MTU is optimistic — a downstream hop silently drops
-       oversized packets without the SSR knowing. These counters do NOT fire for
-       this case. Use ping with dont_frag=True + binary search on packet size to
-       detect and confirm.
+       oversized packets. These counters do NOT fire for this case. Use ping with
+       dont_frag=True + binary search on packet size to detect and confirm.
 
-    Key counters:
-      sent.ipv4_dont_fragment_drop   — SSR dropped DF-set packet (always a problem)
-      sent.ipv4_packets_fragmented   — SSR fragmented a packet (DF not set; may be expected)
-      sent.ipv4_non_fabric_fragments — fragments on standard IP-routed paths
-      sent.ipv4_fabric_fragments     — fragments on SVR paths
+    Key counters (each reports total_change, current_rate, avg_rate, max_rate, trend):
+      sent.ipv4_dont_fragment_drop        — SSR dropped DF-set packet (always a problem)
+      sent.ipv4_packets_fragmented        — SSR fragmented a non-DF packet (may be expected)
+      sent.ipv4_non_fabric_fragments      — fragments on standard IP-routed paths
+      sent.ipv4_fabric_fragments          — fragments on SVR paths
       received.successfully_reassembled   — fragmented traffic arriving at SSR
       received.fragment_chains_timeout    — reassembly timed out (~15s); lost fragments
       received.failure_to_reassemble      — fragments collected but reassembly failed
 
     Args:
-        router: Router name (required).
+        router:         Router name (required).
+        window_minutes: How far back to look. Default 30 minutes.
     """
-    return json.dumps(await get_client().get_fragmentation_stats(router), indent=2)
+    return json.dumps(await get_client().get_fragmentation_stats(router, window_minutes), indent=2)
 
 
 @mcp.tool()
@@ -3240,8 +3233,9 @@ Run regardless of app-id availability. Call **in parallel** (router + node):
 - `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-resets-transmitted`
   and `parameters=[{{"name": "network-interface", "itemize": true}}]` — RSTs the SSR
   itself sent. Non-zero means the SSR is actively terminating connections.
-- `get_fragmentation_stats` (router only, no node parameter) — seven counters covering
-  DF-drop, fragmentation, and reassembly. Cheap call; the result drives Step 7.
+- `get_fragmentation_stats` (router only, no node parameter) — delta-based activity
+  over the last 30 minutes for seven fragmentation/reassembly counters. The result
+  drives Step 7.
 
 Then call `get_bgp_summary` (router + node) **if BGP is configured**:
 - All neighbors Established → BGP healthy, move on quickly.
@@ -3267,22 +3261,17 @@ Then call `get_bgp_summary` (router + node) **if BGP is configured**:
     clients, or NAT state issues). Not a link-quality problem.
   - Those stats near zero → RSTs from policy enforcement, capacity, or access control.
 - Fragmentation (`get_fragmentation_stats`):
-  **These are cumulative counters that only ever increase — a non-zero value does not
-  mean fragmentation is happening right now.** Before drawing any conclusion, call
-  `get_fragmentation_stats` a second time after a 30-second pause and compare the
-  values. Only counters that increased between the two calls indicate active
-  fragmentation at this moment. If you cannot wait, note the uncertainty explicitly.
-  - `sent.ipv4_dont_fragment_drop` actively incrementing → SSR is currently dropping
+  Results show the delta over the last 30 minutes (`total_change`), not cumulative
+  totals. Zero means no events in that window regardless of historical counts.
+  - `sent.ipv4_dont_fragment_drop.total_change > 0` → SSR is actively dropping
     DF-set packets too large for the outbound MTU. Always a misconfiguration. Carry
     forward to Step 7.
-  - `sent.ipv4_packets_fragmented` actively incrementing → SSR is currently
-    fragmenting non-DF packets (typically UDP). Sub-optimal but expected SSR
-    behaviour. Carry forward to Step 7.
-  - Counters non-zero but not increasing → historical events; not an active problem.
-    Note the totals but do not carry forward to Step 7.
-  - All zeros → no fragmentation events ever recorded. A downstream MTU black hole
-    is still possible; investigate in Step 7 only if Step 5 reveals link-wide
-    retransmissions that Step 6 cannot explain.
+  - `sent.ipv4_packets_fragmented.total_change > 0` (and DF-drop = 0) → SSR is
+    actively fragmenting non-DF packets (typically UDP). Sub-optimal but expected.
+    Carry forward to Step 7.
+  - All total_change = 0 → no fragmentation in the last 30 minutes. A downstream
+    MTU black hole is still possible; investigate in Step 7 only if Step 5 reveals
+    link-wide retransmissions that Step 6 cannot explain.
 
 **Interface correlation note:** observe which interfaces have problems (down, errors,
 alarms, retransmissions). You will use this in Step 5 to check whether the affected
