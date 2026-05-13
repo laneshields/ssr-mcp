@@ -3462,20 +3462,53 @@ the slow-traffic complaint.
 
 ### Branch A: `has_http_https` is true
 
-Call `get_application_series` (router + node, `window_minutes=30`, `summarize=True`).
-If an application was specified, pass it as the `application` filter.
+**Sub-case A1: No specific application named (general slow traffic)**
 
-**IDP note:** if IDP is enabled on this router, the same client address appears twice
-per time bucket — once under the base service (IDP→WAN leg) and once under the
-`*-idp*` service variant (LAN→IDP leg). The `summarize=True` output deduplicates
-these automatically. If using `summarize=False`, be aware of this duplication.
+Call `get_application_tcp_health` (router + node, `window_minutes=30`).
+This returns all active applications sorted by worst retransmission rate — compact
+and focused on TCP health signals. Use it to identify which applications are
+exhibiting the most loss or latency symptoms before pulling any per-client detail.
+
+**TCP health signals to assess:**
+- Use `tcp_retrans_from_server_pct` and `tcp_retrans_from_client_pct` to rank
+  severity across applications.
+- `ssr_retrans_to_client` or `ssr_retrans_to_server` non-zero → SSR is
+  retransmitting; correlate with session processor CPU from Step 3.
+- `dup_acks_fwd` / `dup_acks_rev` — corroborate the retransmission direction.
+- `out_of_window_fwd` — server-side receive buffer exhausted; may indicate
+  congestion between SSR and server, or a slow server.
+- `avg_tcp_connection_ms` (TTFP) — use for relative latency comparison across
+  applications, not as an absolute threshold. Biased downward under loss (failed
+  connections excluded from the average).
+- `avg_fwd_rtt_ms` / `avg_rev_rtt_ms` — forward and reverse path RTT; elevated
+  fwd suggests WAN latency to the server.
+
+**Pattern recognition:**
+- **One application elevated, others normal** → application-specific or server/CDN
+  issue; drill into that app with `get_application_series` (see below).
+- **All applications elevated** → link-wide or SSR-wide problem; check peer path
+  metrics in Step 6 and MTU/MSS in Step 7.
+- **Retransmissions low but TTFP/RTT elevated uniformly** → latency rather than
+  loss; check peer path latency in Step 6.
+- **Drops in Step 4 correlate with retransmissions** → SSR is the common thread;
+  note source NAT / waypoint exhaustion if drops are from many clients.
+
+**Drill-down for a suspect application:**
+Once `get_application_tcp_health` identifies an application with elevated signals,
+call `get_application_series` (router + node, `window_minutes=30`,
+`application=<name>`) for per-client and per-interface detail. The application
+filter keeps the response small.
+
+**IDP note:** if IDP is enabled, the same client appears twice per time bucket —
+once under the base service (IDP→WAN leg) and once under the `*-idp*` variant
+(LAN→IDP leg). The summarized output deduplicates these automatically.
 
 **Pre-processing — exclude management traffic:**
 Entries where `clients[].tenant == "_internal_"` or
 `clients[].networkInterface == "controlKniIf"` are SSR management sessions.
 Exclude them from performance analysis.
 
-**Identify the two key interfaces for each application entry:**
+**Identify the two key interfaces from the drill-down result:**
 
 For each application, note:
 - `clients[].networkInterface` — where client traffic **enters** the SSR
@@ -3485,7 +3518,7 @@ These are the localization anchors. Cross-reference with interface problems foun
 in Step 4: if an interface with errors or alarms matches one of these, that
 strengthens the case that the interface is contributing to the problem.
 
-**Determine flow direction:**
+**Determine flow direction from the drill-down result:**
 
 Inspect `clients[].address` and `clients[].tenant`:
 
@@ -3507,31 +3540,13 @@ Inspect `clients[].address` and `clients[].tenant`:
 Report the suspected interface by name. E.g.: "retransmissions suggest a problem
 on or beyond interface `ge-0-3`."
 
-**TCP health signals:**
-- Use `tcp_retrans_from_server_pct` and `tcp_retrans_from_client_pct` to compare
-  severity across applications.
-- `ssr_retrans_to_client` or `ssr_retrans_to_server` non-zero → SSR is
-  retransmitting; correlate with session processor CPU from Step 3.
-- `dup_acks_fwd` / `dup_acks_rev` — corroborate the retransmission direction.
-- `out_of_window_fwd` — server-side receive buffer exhausted; may indicate
-  congestion between SSR and server, or a slow server.
-- `avg_tcp_connection_ms` (TTFP) — use for relative latency comparison across
-  applications, not as an absolute threshold. Biased downward under loss (failed
-  connections excluded from the average).
+**Sub-case A2: Specific application named**
 
-**Pattern recognition:**
-- **One application elevated, others normal** → application-specific or server/CDN
-  issue; check `list_service_paths` for that service.
-- **All applications elevated on the same nexthop interface** → link-wide problem
-  on that interface. If peer path metrics are clean (Step 6), investigate MTU/MSS
-  mismatch in Step 7.
-- **Retransmissions low but TTFP elevated uniformly** → latency rather than loss;
-  check peer path latency in Step 6.
-- **Drops in Step 4 correlate with retransmissions in app-series** → SSR is
-  the common thread; note source NAT / waypoint exhaustion if drops are
-  from many clients hitting the same service.
+Call `get_application_series` (router + node, `window_minutes=30`,
+`application=<name>`) directly. The filter keeps the response small. Apply the
+same flow-direction and interface-correlation analysis described above.
 
-**If app-series results are ambiguous** — retransmissions elevated but not clearly
+**If results are ambiguous** — retransmissions elevated but not clearly
 isolated to one interface, or no traffic found for the specified application:
 Call in parallel (same router + node):
 - `query_stats` with `stat_id=/stats/aggregate-session/network-interface/tcp-duplicate-acks`
