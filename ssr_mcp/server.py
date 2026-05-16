@@ -3237,6 +3237,7 @@ Then call **in parallel**:
 - `get_session_processor_utilization` (router + node)
 - `get_capacity` (router + node)
 - `get_idp_status` (router + node)
+- `get_resource_allocation` (router + node)
 - `get_source_nat_utilization` (router + node)
 - `get_waypoint_utilization` (router + node)
 
@@ -3260,12 +3261,18 @@ Otherwise flag any entry not in `CONNECTED` state. For each flagged entry identi
 whether it is a conductor link (management plane) or an HA node-to-node link.
 
 ### Node Resources
-CPU, memory, and disk per node. If `cpu_high: true` (≥90%), use `query_metrics`
-(counter=False, window_seconds=1800) on the relevant CPU stat to verify the load
-is sustained before flagging it as critical — compare `avg` vs `current`. If avg
-is also high, report as sustained high CPU. If avg is low, note it as a transient
-spike and do not alarm. Flag `disk_high: true` (≥85%) prominently without
-needing trend confirmation (disk usage does not spike transiently).
+CPU, memory, and disk per node. If `cpu_high` is non-empty (≥90%), cross-reference
+`get_resource_allocation` before investigating: if a `csrx` key is present, parse
+`csrx.cores.assignedMask` as a hex bitmask to identify IDP-dedicated core indices
+(e.g. `0x4` → bit 2 → core 2). Any `cpu_high` entry whose core index matches the
+IDP mask is the cSRX container's dedicated host core — it runs at 100% regardless
+of IDP engine load and is expected. Report it in the IDP section rather than as a
+CPU alarm and do not call `query_metrics` for it. For remaining high-CPU cores,
+use `query_metrics` (counter=False, window_seconds=1800) to verify the load is
+sustained — compare `avg` vs `current`. If avg is also high, report as sustained
+high CPU. If avg is low, note it as a transient spike and do not alarm. Flag
+`disk_high: true` (≥85%) prominently without needing trend confirmation (disk usage
+does not spike transiently).
 
 ### Service Area
 `get_session_processor_utilization` state and per-thread CPU. If state is `High`
@@ -3374,6 +3381,7 @@ Call **in parallel** (router + node):
 - `get_session_processor_utilization` — service area CPU and thread state
 - `get_capacity` — FIB, flow table, action pool utilization
 - `get_node_utilization` — CPU, memory, disk
+- `get_resource_allocation` — core assignment (identifies IDP-dedicated cores)
 - `get_source_nat_utilization` — source NAT port pool (skip silently if `available: false`)
 - `get_waypoint_utilization` — waypoint port pool (skip silently if `available: false`)
 
@@ -3387,9 +3395,12 @@ Call **in parallel** (router + node):
   investigating.
 - `get_capacity`: pool exhaustion causes session drops, not gradual slowness — only
   flag if a pool is at or very near 100%. Redirect to `health_check` if so.
-- `get_node_utilization`: if `cpu_high` is set, use `query_metrics` (counter=False,
-  window_seconds=1800) to confirm it is sustained before treating it as a contributing
-  factor. Flag `disk_high` without trend confirmation needed.
+- `get_node_utilization`: if `cpu_high` is set, cross-reference `get_resource_allocation`
+  first — if a `csrx` key is present, any `cpu_high` core whose index matches
+  `csrx.cores.assignedMask` is the IDP dedicated host core and is expected at 100%;
+  skip it. For remaining high cores, use `query_metrics` (counter=False,
+  window_seconds=1800) to confirm the load is sustained before treating it as a
+  contributing factor. Flag `disk_high` without trend confirmation needed.
 - Source NAT / waypoint pools: port exhaustion causes failed or hanging sessions
   that can appear as intermittent slowness. Flag if pool is exhausted.
 
