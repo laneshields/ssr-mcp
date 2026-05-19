@@ -326,6 +326,18 @@ slow, not just how much there is.
 `query_stats` on `tcp-retransmissions` by network-interface to find which
 interface has active loss, then check `list_service_paths` for that path.
 
+**Critical: correlate path quality to the service actually in use.**
+`list_peer_paths` and `get_router_health` show SVR peer path quality between
+routers. A peer path being DOWN or lossy only affects services that route
+traffic through that peer. It does not affect services using direct internet
+breakout (e.g. a service whose `list_service_paths` shows a WAN interface
+next-hop rather than an SVR peer). Before citing peer path degradation as a
+cause of slowness, confirm with `list_service_paths` that the affected traffic
+actually traverses that peer. For direct internet services, the relevant signal
+is WAN interface quality: check `get_device_interfaces` for errors and
+`query_stats` for `tcp-retransmissions` by network-interface on the WAN
+interface the service uses.
+
 ## Metric interpretation
 
 SSR metrics fall into two types. Using the wrong approach risks false alarms
