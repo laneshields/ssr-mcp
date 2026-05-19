@@ -284,6 +284,48 @@ Understanding this prevents misdiagnosis.
 - Domain name → `app_id_lookup` domain mode (requires `has_http_https`)
 - All else fails → `get_dropped_packets`
 
+## Slow traffic investigation
+
+Use this when the user reports slowness, high latency, or degraded throughput
+— as opposed to traffic being completely broken (use the connectivity decision
+tree for that).
+
+**First: ask which router** if in conductor mode and not already clear from
+context. Don't broadcast across all routers — slow traffic is always
+router-specific.
+
+**Key tool distinction:**
+- `get_top_applications` — bandwidth ranking ("what's using my bandwidth?")
+- `get_application_tcp_health` — TCP health signals ("what's slow or lossy?")
+
+For slow traffic, **start with `get_application_tcp_health`**, not sessions or
+top sources. It returns retransmission rates, duplicate ACKs, out-of-window
+segments, and RTT per application — the signals that explain *why* traffic is
+slow, not just how much there is.
+
+**Step order:**
+1. `begin_query` + `get_router_info` (get node name and confirm app-id status)
+2. In parallel: `get_session_processor_utilization`, `get_node_utilization`,
+   `get_dropped_packets`, `get_network_interfaces`, `get_device_interfaces`,
+   `get_alarms`
+3. If `has_http_https` true: `get_application_tcp_health` (window_minutes=30)
+   — identifies which applications have elevated retransmissions/latency
+4. `list_service_paths` filtered to the affected service — check path quality
+   (latency, jitter, loss) on each peer path
+
+**TCP health signal interpretation:**
+- `tcp_retrans_from_server_pct` high → loss between SSR and server (WAN side)
+- `tcp_retrans_from_client_pct` high → loss between client and SSR (LAN side)
+- `ssr_retrans_to_client` / `ssr_retrans_to_server` non-zero → SSR itself is
+  retransmitting; correlate with session processor CPU
+- `avg_fwd_rtt_ms` elevated → WAN latency to the server is the bottleneck
+- `avg_tcp_connection_ms` (TTFP) high → session setup latency; check peer path
+  latency and service path availability
+
+**If app-id is not enabled:** skip `get_application_tcp_health`; use
+`query_stats` on `tcp-retransmissions` by network-interface to find which
+interface has active loss, then check `list_service_paths` for that path.
+
 ## Metric interpretation
 
 SSR metrics fall into two types. Using the wrong approach risks false alarms
