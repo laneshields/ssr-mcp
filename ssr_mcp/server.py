@@ -49,111 +49,6 @@ class _BearerAuthMiddleware:
         await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 
-mcp = FastMCP(
-    "SSR — Session Smart Router",
-    host=_HOST,
-    port=_PORT,
-)
-
-# ------------------------------------------------------------------
-# Tool-call logging
-# ------------------------------------------------------------------
-
-_LOG_PATH = pathlib.Path(
-    os.environ.get("SSR_MCP_LOG_FILE", pathlib.Path.home() / ".ssr-mcp" / "tool_calls.jsonl")
-)
-
-_SESSION_GAP_SECONDS = 30 * 60  # gap after which a new session is assumed
-
-
-def _maybe_log_session_start(tool_name: str) -> None:
-    """Write a synthetic query record if this looks like the start of a new session.
-
-    Fires when any tool other than begin_query is the first call after a gap of
-    at least _SESSION_GAP_SECONDS, so orphaned tool calls are still groupable by
-    session even when the model skips begin_query.
-    """
-    if tool_name == "begin_query":
-        return
-    try:
-        now = datetime.now(timezone.utc)
-        last_ts = None
-
-        if _LOG_PATH.exists():
-            with _LOG_PATH.open("rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                if size > 0:
-                    f.seek(max(0, size - 4096))
-                    tail = f.read().decode("utf-8", errors="replace")
-                    lines = [ln for ln in tail.strip().splitlines() if ln.strip()]
-                    if lines:
-                        try:
-                            last_ts = datetime.fromisoformat(
-                                json.loads(lines[-1])["ts"]
-                            )
-                        except Exception:
-                            pass
-
-        is_new_session = last_ts is None or (
-            now - last_ts
-        ).total_seconds() > _SESSION_GAP_SECONDS
-
-        if is_new_session:
-            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            record = {
-                "ts": now.isoformat(),
-                "type": "query",
-                "question": f"[unlogged — first tool: {tool_name}]",
-            }
-            with _LOG_PATH.open("a") as f:
-                f.write(json.dumps(record) + "\n")
-    except Exception:
-        pass  # never let logging break a tool call
-
-
-def _log_tool_call(name: str, kwargs: dict, response: str) -> None:
-    try:
-        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "type": "tool_call",
-            "tool": name,
-            "args": kwargs,
-            "response_chars": len(response),
-        }
-        with _LOG_PATH.open("a") as f:
-            f.write(json.dumps(record) + "\n")
-    except Exception:
-        pass  # never let logging break a tool call
-
-
-_mcp_tool = mcp.tool
-
-
-def _logged_tool(*args, **kwargs):
-    original_decorator = _mcp_tool(*args, **kwargs)
-
-    def decorator(fn):
-        @functools.wraps(fn)
-        async def logged(**fkwargs):
-            _maybe_log_session_start(fn.__name__)
-            result = await fn(**fkwargs)
-            _log_tool_call(fn.__name__, fkwargs, result)
-            return result
-
-        logged.__signature__ = inspect.signature(fn)
-        return original_decorator(logged)
-
-    return decorator
-
-
-mcp.tool = _logged_tool
-
-# ------------------------------------------------------------------
-# Query context
-# ------------------------------------------------------------------
-
 _GUIDANCE = """# SSR MCP Operational Guidance
 
 ## Session startup
@@ -318,6 +213,112 @@ against `current` over a 30-min window:
 to confirm whether it is sustained or historical before treating it as a
 confirmed problem.
 """
+
+mcp = FastMCP(
+    "SSR — Session Smart Router",
+    host=_HOST,
+    port=_PORT,
+    instructions=_GUIDANCE,
+)
+
+# ------------------------------------------------------------------
+# Tool-call logging
+# ------------------------------------------------------------------
+
+_LOG_PATH = pathlib.Path(
+    os.environ.get("SSR_MCP_LOG_FILE", pathlib.Path.home() / ".ssr-mcp" / "tool_calls.jsonl")
+)
+
+_SESSION_GAP_SECONDS = 30 * 60  # gap after which a new session is assumed
+
+
+def _maybe_log_session_start(tool_name: str) -> None:
+    """Write a synthetic query record if this looks like the start of a new session.
+
+    Fires when any tool other than begin_query is the first call after a gap of
+    at least _SESSION_GAP_SECONDS, so orphaned tool calls are still groupable by
+    session even when the model skips begin_query.
+    """
+    if tool_name == "begin_query":
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        last_ts = None
+
+        if _LOG_PATH.exists():
+            with _LOG_PATH.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                if size > 0:
+                    f.seek(max(0, size - 4096))
+                    tail = f.read().decode("utf-8", errors="replace")
+                    lines = [ln for ln in tail.strip().splitlines() if ln.strip()]
+                    if lines:
+                        try:
+                            last_ts = datetime.fromisoformat(
+                                json.loads(lines[-1])["ts"]
+                            )
+                        except Exception:
+                            pass
+
+        is_new_session = last_ts is None or (
+            now - last_ts
+        ).total_seconds() > _SESSION_GAP_SECONDS
+
+        if is_new_session:
+            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "ts": now.isoformat(),
+                "type": "query",
+                "question": f"[unlogged — first tool: {tool_name}]",
+            }
+            with _LOG_PATH.open("a") as f:
+                f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass  # never let logging break a tool call
+
+
+def _log_tool_call(name: str, kwargs: dict, response: str) -> None:
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "tool_call",
+            "tool": name,
+            "args": kwargs,
+            "response_chars": len(response),
+        }
+        with _LOG_PATH.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass  # never let logging break a tool call
+
+
+_mcp_tool = mcp.tool
+
+
+def _logged_tool(*args, **kwargs):
+    original_decorator = _mcp_tool(*args, **kwargs)
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def logged(**fkwargs):
+            _maybe_log_session_start(fn.__name__)
+            result = await fn(**fkwargs)
+            _log_tool_call(fn.__name__, fkwargs, result)
+            return result
+
+        logged.__signature__ = inspect.signature(fn)
+        return original_decorator(logged)
+
+    return decorator
+
+
+mcp.tool = _logged_tool
+
+# ------------------------------------------------------------------
+# Query context
+# ------------------------------------------------------------------
 
 
 @mcp.tool()
