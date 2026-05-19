@@ -164,6 +164,10 @@ async def begin_query(question: str) -> str:
     is used to correlate tool call sequences with user intent in server-side
     logs and improve the tool over time.
 
+    At the start of a new session (first request), also call `get_guidance`
+    immediately after this to load operational rules, the traffic flow model,
+    and the troubleshooting decision tree.
+
     Args:
         question: A one- or two-sentence summary of what the user is asking.
     """
@@ -179,6 +183,130 @@ async def begin_query(question: str) -> str:
     except Exception:
         pass
     return "OK"
+
+
+@mcp.tool()
+async def get_guidance() -> str:
+    """Return operational guidance for using this MCP server effectively.
+
+    Call this once at the start of any session where you haven't used these
+    tools before, or when you are unsure how to proceed. It returns rules for
+    session startup, connection mode differences, the SSR traffic flow model,
+    the connectivity troubleshooting decision tree, metric interpretation, and
+    how to resolve vague source/destination descriptions.
+
+    No arguments required.
+    """
+    return """# SSR MCP Operational Guidance
+
+## Session startup
+
+1. Call `begin_query` first on every user request — before any other tool.
+2. Call `get_connection_info` at the start of a session to determine connection
+   mode (conductor, router-managed, router-cloud, router-standalone).
+3. Before doing router-specific work, call `get_router_info` to get node names
+   (required by most router-targeted tools), software version, and whether
+   app-id is enabled. Do not guess node names.
+
+## Connection modes
+
+| Mode | Description |
+|---|---|
+| conductor | SSR_HOST is a conductor. All managed routers accessible by name via `router:` param. Conductor-only tools available (`get_assets`, `find_sessions`). |
+| router-managed | Connected directly to a conductor-managed router. Only local device accessible. Conductor-only tools unavailable. |
+| router-cloud | Mist/cloud-managed router. No on-premises conductor. |
+| router-standalone | Standalone router with no management plane. |
+
+In conductor mode, tools with an optional `router:` param scope authority-wide
+when omitted. In all router modes, they scope to the local device.
+
+## SSR traffic flow
+
+Understanding this prevents misdiagnosis.
+
+1. **Tenant classification** — source IP + ingress interface matched against
+   tenant membership rules to assign a tenant.
+2. **FIB lookup** — tenant + dest IP + port + protocol looked up. Either 0 or 1
+   match.
+   - **No match (FIB miss):** SSR sends ICMP network unreachable. Packet is
+     silently dropped and **does NOT appear in `get_dropped_packets`**.
+     `fib_lookup` returning no result confirms a FIB miss. Root cause: missing
+     service or incorrect tenant config.
+   - **Match:** entry identifies the service and provides 0 or more next-hops.
+3. **Next-hop check:**
+   - **0 next-hops:** traffic cannot be forwarded. **Appears in
+     `get_dropped_packets`.**
+   - **1+ next-hops:** packet proceeds to service area for session processing.
+4. **Service area processing** — session established or fails. Failures **appear
+   in `get_dropped_packets`**.
+5. **Session established but traffic broken** — if `get_dropped_packets` is
+   empty, `fib_lookup` shows a valid match with next-hops, and sessions are
+   establishing but traffic is still broken, the fault is likely outside the
+   SSR. Check `list_service_paths` and `list_peer_paths`; if healthy the
+   problem is external.
+
+## Connectivity troubleshooting decision tree
+
+- No source/destination specifics → `get_dropped_packets` unfiltered
+- Service area CPU high, no explanation → `get_dropped_packets` (flood of
+  unmatched traffic)
+- Have source + destination → `fib_lookup`
+  - No result → FIB miss → tenant or service config problem (not in dropped
+    packets)
+  - Result, 0 next-hops → `get_dropped_packets` to confirm + check
+    service/path config
+  - Result, 1+ next-hops → `get_sessions` to confirm session; if session
+    exists check `list_service_paths` / `list_peer_paths`
+- `get_dropped_packets` empty + valid FIB match + sessions establishing +
+  traffic broken → problem outside SSR
+
+## Resolving a vague source
+
+- Hostname/device description → `get_dhcp_leases` (by hostname) or `get_arp`
+- Physical interface name → `get_device_interfaces`; if single network
+  interface on it, use that name directly
+- Network interface name → match directly in `get_network_interfaces`
+- Source IP, directly connected → match subnet against ethernet-type
+  interfaces in `get_network_interfaces`
+- Source IP, off-network → `get_rib` LPM → next-hop `interfaceName` is a giid
+  (e.g. `g12`) → match number against `globalId` in `get_network_interfaces`
+
+## Resolving a vague destination
+
+- Named service ("internet", "corporate-vpn") → `list_services` then
+  `list_service_paths`
+- Application name ("Teams", "Zoom"):
+  - `has_http_https` enabled → `get_app_id_cache` (address cache,
+    `summarize=False`) filtered by app name → dest IP/port/protocol →
+    `fib_lookup`
+  - Completely broken (cache may be empty) → `get_dropped_packets`
+  - App-id not enabled → ask user for IP/port
+- Domain name → `app_id_lookup` domain mode (requires `has_http_https`)
+- All else fails → `get_dropped_packets`
+
+## Metric interpretation
+
+SSR metrics fall into two types. Using the wrong approach risks false alarms
+or missed problems.
+
+**Cumulative counters** (dropped packets, TCP retransmissions, fragmentation
+events, error counts): values only ever increase. The raw value is meaningless
+in isolation. Use `query_metrics` with `counter=True` and check `total_change`
+over a window (default 30 min). Zero = no events in that period. Non-zero =
+condition is active now.
+
+**Gauge time-series** (CPU%, memory%, session count, bandwidth): values
+fluctuate. A single point-in-time reading cannot distinguish a spike from
+sustained load. Use `query_metrics` with `counter=False` and compare `avg`
+against `current` over a 30-min window:
+- `current` >> `avg`: transient spike; not necessarily a problem.
+- `current` ≈ `avg` and both high: sustained load; treat as a real issue.
+- `trend = "decreasing"`: condition was worse earlier; may be self-resolving.
+
+**Rule:** when a point-in-time tool flags something high, use `query_metrics`
+to confirm whether it is sustained or historical before treating it as a
+confirmed problem.
+"""
 
 
 @mcp.tool()

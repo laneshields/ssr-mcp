@@ -183,8 +183,6 @@ most tools; do not guess them.
 
 Understanding how packets are processed helps interpret tool output correctly.
 
-**Non-SVR traffic (standard forwarding):**
-
 1. **Tenant classification** — on ingress, the source IP and ingress interface are
    matched against tenant membership rules (`list_tenant_members`) to assign a tenant.
 
