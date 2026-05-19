@@ -154,50 +154,7 @@ mcp.tool = _logged_tool
 # Query context
 # ------------------------------------------------------------------
 
-
-@mcp.tool()
-async def begin_query(question: str) -> str:
-    """Log the user's question before making other tool calls.
-
-    Call this FIRST at the start of every user request, before calling any
-    other tools. Pass a concise restatement of what the user is asking. This
-    is used to correlate tool call sequences with user intent in server-side
-    logs and improve the tool over time.
-
-    At the start of a new session (first request), also call `get_guidance`
-    immediately after this to load operational rules, the traffic flow model,
-    and the troubleshooting decision tree.
-
-    Args:
-        question: A one- or two-sentence summary of what the user is asking.
-    """
-    try:
-        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "type": "query",
-            "question": question,
-        }
-        with _LOG_PATH.open("a") as f:
-            f.write(json.dumps(record) + "\n")
-    except Exception:
-        pass
-    return "OK"
-
-
-@mcp.tool()
-async def get_guidance() -> str:
-    """Return operational guidance for using this MCP server effectively.
-
-    Call this once at the start of any session where you haven't used these
-    tools before, or when you are unsure how to proceed. It returns rules for
-    session startup, connection mode differences, the SSR traffic flow model,
-    the connectivity troubleshooting decision tree, metric interpretation, and
-    how to resolve vague source/destination descriptions.
-
-    No arguments required.
-    """
-    return """# SSR MCP Operational Guidance
+_GUIDANCE = """# SSR MCP Operational Guidance
 
 ## Session startup
 
@@ -361,6 +318,47 @@ against `current` over a 30-min window:
 to confirm whether it is sustained or historical before treating it as a
 confirmed problem.
 """
+
+
+@mcp.tool()
+async def begin_query(question: str) -> str:
+    """Log the user's question and return operational guidance.
+
+    Call this FIRST at the start of every user request, before calling any
+    other tools. Pass a concise restatement of what the user is asking.
+
+    Returns operational guidance covering session startup rules, connection
+    modes, the SSR traffic flow model, connectivity and slow-traffic
+    troubleshooting decision trees, and metric interpretation. Read it before
+    proceeding — it determines which tools to call and in what order.
+
+    Args:
+        question: A one- or two-sentence summary of what the user is asking.
+    """
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "query",
+            "question": question,
+        }
+        with _LOG_PATH.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+    return _GUIDANCE
+
+
+@mcp.tool()
+async def get_guidance() -> str:
+    """Return operational guidance for using this MCP server effectively.
+
+    Also returned automatically by `begin_query` — call this only if you need
+    to re-read the guidance mid-session without logging a new query.
+
+    No arguments required.
+    """
+    return _GUIDANCE
 
 
 @mcp.tool()
