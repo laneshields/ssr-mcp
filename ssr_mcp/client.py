@@ -165,9 +165,6 @@ class SSRClient:
                 result["display_name"] = await self._get_mist_display_name(router, node)
         return result
 
-    async def get_router(self, router: str) -> dict:
-        return await self._get(f"/api/v1/router/{router}")
-
     async def get_router_nodes(self, router: str) -> list:
         return await self._get(f"/api/v1/router/{router}/node")
 

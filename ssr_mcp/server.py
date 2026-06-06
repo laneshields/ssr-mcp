@@ -515,33 +515,6 @@ async def list_routers() -> str:
     return json.dumps(routers, indent=2)
 
 
-@mcp.tool()
-async def get_router(router: str) -> str:
-    """Get details for a specific router by name.
-
-    Context: router — pass the router name from list_routers or
-             get_connection_info.
-
-    Args:
-        router: Router name (e.g. 'boston-branch-01').
-    """
-    data = await get_client().get_router(router)
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool()
-async def list_router_nodes(router: str) -> str:
-    """List the nodes (control/combo/primary/secondary) that make up a router.
-
-    Context: router — targets a specific managed router or the local device.
-
-    Args:
-        router: Router name.
-    """
-    nodes = await get_client().get_router_nodes(router)
-    return json.dumps(nodes, indent=2)
-
-
 # ------------------------------------------------------------------
 # Alarms
 # ------------------------------------------------------------------
@@ -769,7 +742,6 @@ async def get_router_info(router: str) -> str:
         has_all = "all" in modes
         app_id = {
             "enabled": True,
-            "modes": modes,
             "has_module": has_all or "module" in modes,
             "has_http_https": has_all or "http" in modes or "https" in modes,
         }
