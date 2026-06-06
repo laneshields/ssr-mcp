@@ -1578,15 +1578,64 @@ class SSRClient:
     }
     """
 
+    _PLATFORM_SUMMARY_QUERY = """
+    query NodePlatformSummary(
+      $routerName: String
+      $nodeName: String
+    ) {
+      allRouters(name: $routerName) {
+        nodes {
+          name
+          nodes(name: $nodeName) {
+            nodes {
+              name
+              platform {
+                memory
+                cpu {
+                  type
+                  speed
+                  hyperThreading
+                  cores
+                  fastlaneCores
+                  isolatedCoreMask
+                  dedicatedCoreMask
+                  powerSaver
+                }
+                disks {
+                  name
+                  space
+                  percentUsed
+                  powerOnHours
+                  terabytesWritten
+                  terabytesWrittenPerYear
+                }
+                operatingSystem {
+                  name
+                  version
+                  kernelVersion
+                }
+                vendor {
+                  vendor
+                  product
+                  version
+                  serialNumber
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
     async def get_platform(
         self,
         router: str | None = None,
         node: str | None = None,
+        summary: bool = True,
     ) -> dict:
-        return await self._graphql(
-            self._PLATFORM_QUERY,
-            {"routerName": router, "nodeName": node},
-        )
+        query = self._PLATFORM_SUMMARY_QUERY if summary else self._PLATFORM_QUERY
+        return await self._graphql(query, {"routerName": router, "nodeName": node})
 
     _SYSTEM_SERVICES_QUERY = """
     query SystemServices(
@@ -2025,7 +2074,13 @@ class SSRClient:
     # Config
     # ------------------------------------------------------------------
 
-    async def get_running_config(self, router: str | None = None) -> dict:
+    async def get_running_config(
+        self,
+        router: str | None = None,
+        subtree: str | None = None,
+    ) -> dict:
+        if subtree:
+            return await self._get(f"/api/v1/config/running/{subtree}")
         if router:
             return await self._get(f"/api/v1/config/running/authority/router/{router}")
         return await self._get("/api/v1/config/running")
@@ -2270,9 +2325,18 @@ class SSRClient:
         router: str,
         vrf: str = "default",
         address_family: str = "ipv4",
+        prefix: str | None = None,
+        limit: int = 100,
     ) -> dict:
         params = {"addressFamily": address_family, "vrf": vrf}
-        return await self._get(f"/api/v1/router/{router}/routing/bgp", params=params)
+        result = await self._get(f"/api/v1/router/{router}/routing/bgp", params=params)
+        routes = result.get("routes", [])
+        if prefix:
+            routes = [r for r in routes if prefix in r.get("prefix", "")]
+        if limit > 0:
+            routes = routes[:limit]
+        result["routes"] = routes
+        return result
 
     async def get_bgp_advertised_routes(
         self,
@@ -2280,11 +2344,15 @@ class SSRClient:
         neighbor: str,
         vrf: str = "default",
         address_family: str = "ipv4",
+        prefix: str | None = None,
     ) -> dict:
         params = {"addressFamily": address_family, "neighborAddress": neighbor, "vrf": vrf}
-        return await self._get(
+        result = await self._get(
             f"/api/v1/router/{router}/routing/bgp/neighbors/advertised-routes", params=params
         )
+        if prefix:
+            result["routes"] = [r for r in result.get("routes", []) if prefix in r.get("prefix", "")]
+        return result
 
     async def get_bgp_received_routes(
         self,
@@ -2292,11 +2360,15 @@ class SSRClient:
         neighbor: str,
         vrf: str = "default",
         address_family: str = "ipv4",
+        prefix: str | None = None,
     ) -> dict:
         params = {"addressFamily": address_family, "neighborAddress": neighbor, "vrf": vrf}
-        return await self._get(
+        result = await self._get(
             f"/api/v1/router/{router}/routing/bgp/neighbors/received-routes", params=params
         )
+        if prefix:
+            result["routes"] = [r for r in result.get("routes", []) if prefix in r.get("prefix", "")]
+        return result
 
     async def get_bgp_neighbors(
         self,
@@ -2331,22 +2403,6 @@ class SSRClient:
     # ------------------------------------------------------------------
     # IDP
     # ------------------------------------------------------------------
-
-    async def get_source_nat_utilization(self, router: str, node: str) -> dict:
-        return {
-            "available": False,
-            "reason": "Source NAT pool utilization is not yet exposed via the SSR REST or GraphQL APIs.",
-            "router": router,
-            "node": node,
-        }
-
-    async def get_waypoint_utilization(self, router: str, node: str) -> dict:
-        return {
-            "available": False,
-            "reason": "Waypoint pool utilization is not yet exposed via the SSR REST or GraphQL APIs.",
-            "router": router,
-            "node": node,
-        }
 
     _IDP_STAT_IDS = [
         "/stats/idp/attacks/total",

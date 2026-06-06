@@ -560,19 +560,6 @@ async def test_get_bgp_received_routes(c: SSRClient, ctx: TestContext):
     assert isinstance(r, (list, dict))
 
 # ---------------------------------------------------------------------------
-# Tests — stub tools (always available, always return available: false)
-# ---------------------------------------------------------------------------
-
-@register()
-async def test_get_source_nat_utilization(c: SSRClient, ctx: TestContext):
-    r = await c.get_source_nat_utilization(ctx.router, ctx.node)
-    assert "available" in r
-
-@register()
-async def test_get_waypoint_utilization(c: SSRClient, ctx: TestContext):
-    r = await c.get_waypoint_utilization(ctx.router, ctx.node)
-    assert "available" in r
-
 # ---------------------------------------------------------------------------
 # Tests — conductor-only
 # ---------------------------------------------------------------------------

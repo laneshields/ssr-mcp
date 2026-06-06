@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -56,9 +57,10 @@ _GUIDANCE = """# SSR MCP Operational Guidance
 1. Call `begin_query` first on every user request — before any other tool.
 2. Call `get_connection_info` at the start of a session to determine connection
    mode (conductor, router-managed, router-cloud, router-standalone).
-3. Before doing router-specific work, call `get_router_info` to get node names
-   (required by most router-targeted tools), software version, and whether
-   app-id is enabled. Do not guess node names.
+3. Before doing router-specific work, call `get_router_info` and
+   `get_router_health` **in parallel** to get node names, software version,
+   app-id status, and current health state in a single round trip. Do not
+   guess node names.
 
 ## Connection modes
 
@@ -320,6 +322,163 @@ mcp.tool = _logged_tool
 # Query context
 # ------------------------------------------------------------------
 
+_TRIAGE_CATEGORIES: dict[str, dict] = {
+    "reachability": {
+        "keywords": [
+            "can't reach", "unreachable", "blocked", "not accessible",
+            "not working", "cannot connect", "dropped", "no route",
+        ],
+        "workflow": [
+            "1. If destination is an app name (Teams, Zoom, etc.) and has_http_https is enabled: "
+            "get_app_id_cache to resolve IPs/ports, then proceed.",
+            "2. If source/dest known → fib_lookup; no result = FIB miss (tenant/service config problem).",
+            "3. FIB result, 0 next-hops → get_dropped_packets to confirm; check service/path config.",
+            "4. FIB result, 1+ next-hops → get_sessions to confirm session; "
+            "if session exists check list_service_paths / list_peer_paths.",
+            "5. No source/dest specifics → get_dropped_packets unfiltered first.",
+        ],
+        "tools": ["fib_lookup", "get_dropped_packets", "get_sessions", "list_service_paths",
+                  "list_peer_paths", "get_app_id_cache"],
+        "clarifying_questions": [
+            "Do you have a source IP or hostname?",
+            "What destination are they trying to reach?",
+            "Is traffic completely absent or intermittently failing?",
+        ],
+    },
+    "performance": {
+        "keywords": [
+            "slow", "latency", "high rtt", "poor performance", "lag",
+            "sluggish", "degraded", "timeout",
+        ],
+        "workflow": [
+            "1. If destination is an app name and has_http_https is enabled: "
+            "get_app_id_cache to resolve IPs, then proceed.",
+            "2. get_application_tcp_health — find apps with elevated retransmissions/RTT.",
+            "3. list_peer_paths — check SVR path latency/loss/MOS; confirm the affected "
+            "service actually routes through the degraded peer before citing it as a cause.",
+            "4. get_application_series (raw) — confirm which tenant/IPs are affected.",
+            "5. query_metrics on interface bandwidth — rule out local congestion.",
+        ],
+        "tools": ["get_application_tcp_health", "list_peer_paths", "get_application_series",
+                  "query_metrics", "get_app_id_cache"],
+        "clarifying_questions": [
+            "Is this for a specific application (e.g. Teams, Zoom)?",
+            "Is it affecting all sites or one router?",
+        ],
+    },
+    "health": {
+        "keywords": [
+            "alarm", "down", "unhealthy", "not healthy", "health check",
+            "offline", "status", "node", "ha", "failover", "redundancy",
+        ],
+        "workflow": [
+            "1. get_conductor_summary (conductor mode) for authority-wide overview.",
+            "2. get_router_health for a specific router → alarms, node state, processes, utilization.",
+            "3. Drill into any 'High' state with query_metrics to confirm sustained vs transient spike.",
+        ],
+        "tools": ["get_conductor_summary", "get_router_health", "get_alarms", "query_metrics"],
+        "clarifying_questions": ["Is this a specific router or the whole network?"],
+    },
+    "bgp": {
+        "keywords": [
+            "bgp", "border gateway", "peer", "neighbor", "advertised", "received",
+        ],
+        "workflow": [
+            "1. get_bgp_summary — neighbor state counts.",
+            "2. get_bgp_neighbors — per-neighbor detail; check Established vs other states.",
+            "3. get_bgp_received_routes / get_bgp_advertised_routes for a specific neighbor.",
+            "4. get_rib — verify routes are installed.",
+        ],
+        "tools": ["get_bgp_summary", "get_bgp_neighbors", "get_bgp_received_routes",
+                  "get_bgp_advertised_routes", "get_rib"],
+        "clarifying_questions": [
+            "Do you have a specific BGP neighbor IP?",
+            "Are routes missing or are neighbors down?",
+        ],
+    },
+    "capacity": {
+        "keywords": [
+            "cpu", "memory", "utilization", "overloaded", "high load", "resource",
+            "exhausted", "full", "session count", "session table", "session limit",
+        ],
+        "workflow": [
+            "1. get_node_utilization — CPU, memory, disk.",
+            "2. get_session_processor_utilization — service area thread load.",
+            "3. query_metrics with counter=False; compare current vs avg to confirm sustained vs spike.",
+            "4. get_capacity — session/flow table headroom.",
+        ],
+        "tools": ["get_node_utilization", "get_session_processor_utilization",
+                  "query_metrics", "get_capacity"],
+        "clarifying_questions": ["Which router is showing high load?"],
+    },
+    "idp": {
+        "keywords": [
+            "idp", "intrusion", "attack", "threat", "malicious", "blocked by",
+            "ids", "antivirus", "anti-virus", "signature", "exploit", "vulnerability",
+        ],
+        "workflow": [
+            "1. get_idp_status — engine state, container health, SPU utilization.",
+            "2. get_security_events — recent IDP hits, grouped by attack type.",
+            "3. Correlate with get_sessions to find associated flows.",
+            "4. If legitimate traffic is being blocked: cross-reference with get_dropped_packets.",
+        ],
+        "tools": ["get_idp_status", "get_security_events", "get_sessions", "get_dropped_packets"],
+        "clarifying_questions": [
+            "Is IDP blocking legitimate traffic or are you investigating an attack?",
+        ],
+    },
+    "sessions": {
+        "keywords": ["session", "flow", "nat", "forwarding"],
+        "workflow": [
+            "1. get_sessions (with source/dest filter if known).",
+            "2. get_session on a specific UUID for full detail.",
+            "3. find_sessions in conductor mode for cross-router search.",
+        ],
+        "tools": ["get_sessions", "get_session", "find_sessions"],
+        "clarifying_questions": [
+            "Do you have a source IP, destination, or session UUID?",
+        ],
+    },
+    "discovery": {
+        "keywords": [
+            "what routers", "explore", "what services", "topology", "what sites",
+            "inventory", "overview", "top applications", "what applications",
+        ],
+        "workflow": [
+            "1. list_routers — enumerate all routers.",
+            "2. get_router_health per router for quick status.",
+            "3. list_services / list_peer_paths for service and path inventory.",
+            "4. get_top_applications / get_application_names for app inventory.",
+        ],
+        "tools": ["list_routers", "get_router_health", "list_services",
+                  "list_peer_paths", "get_top_applications", "get_application_names"],
+        "clarifying_questions": [],
+    },
+}
+
+
+def _classify_query(question: str) -> dict:
+    q = question.lower()
+    scores = {
+        cat: sum(
+            1 for kw in data["keywords"]
+            if re.search(r"\b" + re.escape(kw), q)
+        )
+        for cat, data in _TRIAGE_CATEGORIES.items()
+    }
+    best = max(scores, key=scores.get)
+    hits = scores[best]
+    if hits == 0:
+        return {"category": "general", "confidence": "low"}
+    data = _TRIAGE_CATEGORIES[best]
+    return {
+        "category": best,
+        "confidence": "high" if hits >= 2 else "medium",
+        "recommended_workflow": data["workflow"],
+        "tools_in_scope": data["tools"],
+        "clarifying_questions": data["clarifying_questions"],
+    }
+
 
 @mcp.tool()
 async def begin_query(question: str) -> str:
@@ -328,7 +487,8 @@ async def begin_query(question: str) -> str:
     Call this FIRST at the start of every user request, before calling any
     other tools. Pass a concise restatement of what the user is asking.
 
-    Returns operational guidance covering session startup rules, connection
+    Returns a triage block (when the query matches a known category) followed
+    by full operational guidance covering session startup rules, connection
     modes, the SSR traffic flow model, connectivity and slow-traffic
     troubleshooting decision trees, and metric interpretation. Read it before
     proceeding — it determines which tools to call and in what order.
@@ -347,7 +507,27 @@ async def begin_query(question: str) -> str:
             f.write(json.dumps(record) + "\n")
     except Exception:
         pass
-    return _GUIDANCE
+
+    triage = _classify_query(question)
+    if triage["confidence"] == "low":
+        return _GUIDANCE
+
+    triage_block = (
+        "## Triage\n\n"
+        f"**Category:** {triage['category']}  \n"
+        f"**Confidence:** {triage['confidence']}\n\n"
+        "**Recommended workflow:**\n"
+        + "\n".join(f"- {step}" for step in triage["recommended_workflow"])
+        + "\n\n**Tools in scope:** "
+        + ", ".join(f"`{t}`" for t in triage["tools_in_scope"])
+    )
+    if triage["clarifying_questions"]:
+        triage_block += (
+            "\n\n**Clarifying questions to ask if needed:**\n"
+            + "\n".join(f"- {q}" for q in triage["clarifying_questions"])
+        )
+    triage_block += "\n\n---\n\n"
+    return triage_block + _GUIDANCE
 
 
 @mcp.tool()
@@ -1576,17 +1756,23 @@ async def get_arp(
 async def get_platform(
     router: str | None = None,
     node: str | None = None,
+    summary: bool = True,
 ) -> str:
-    """Get hardware platform information for nodes — CPU, memory, NICs, disks,
+    """Get hardware platform information for nodes — CPU, memory, disks,
     OS, and vendor/product details.
+
+    By default returns summary mode (omits NIC/deviceInterfaces inventory,
+    which can be very large on multi-NIC systems). Pass summary=False to
+    include full NIC detail (manufacturer, driver, PCI address, MAC, firmware).
 
     Context: any — omit router to query the connected device itself.
 
     Args:
-        router: (optional) Limit to a specific router.
-        node:   (optional) Limit to a specific node within that router.
+        router:  (optional) Limit to a specific router.
+        node:    (optional) Limit to a specific node within that router.
+        summary: (optional) When True (default), omit deviceInterfaces detail.
     """
-    data = await get_client().get_platform(router, node)
+    data = await get_client().get_platform(router, node, summary)
     return json.dumps(data, indent=2)
 
 
@@ -1935,22 +2121,28 @@ async def get_dropped_packets(
 
 
 @mcp.tool()
-async def get_running_config(router: str | None = None) -> str:
+async def get_running_config(
+    router: str | None = None,
+    subtree: str | None = None,
+) -> str:
     """Fetch the running configuration.
 
     WARNING: Without a router filter this returns the full authority
     configuration, which can be very large on conductors managing many
-    routers. Pass router to limit the response to a single router's config
-    subtree whenever you only need one router's configuration.
+    routers. Use router or subtree to limit the response whenever possible.
 
     Context: any — without router, returns the full authority config (conductor)
              or the local device config (standalone router). With router,
-             returns that router's config subtree regardless of connection mode.
+             returns that router's config subtree. With subtree, fetches an
+             arbitrary config path (e.g. "authority/router/boston-01/service").
 
     Args:
         router: (optional) Limit to this router's config subtree.
+        subtree: (optional) Fetch a specific config path, e.g.
+            "authority/router/boston-01/service". When provided, takes
+            precedence over router.
     """
-    config = await get_client().get_running_config(router)
+    config = await get_client().get_running_config(router, subtree)
     return json.dumps(config, indent=2)
 
 
@@ -2701,10 +2893,12 @@ async def get_bgp_routes(
     router: str,
     vrf: str = "default",
     address_family: str = "ipv4",
+    prefix: str | None = None,
+    limit: int = 100,
 ) -> str:
-    """Get the full BGP routing table — equivalent to 'show bgp'.
+    """Get the BGP routing table — equivalent to 'show bgp'.
 
-    Returns every prefix with all candidate paths. Each path includes:
+    Returns prefixes with all candidate paths. Each path includes:
     bestpath flag, selection reason, AS path, origin, metric, weight,
     peer ID, and nexthops with hostnames.
 
@@ -2714,8 +2908,11 @@ async def get_bgp_routes(
         router:         Router name (required).
         vrf:            VRF name. Default 'default'.
         address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+        prefix:         (optional) Filter to prefixes containing this string,
+                        e.g. "192.168" or "10.0.0.0/8".
+        limit:          Max prefixes to return. Default 100. Use 0 for no limit.
     """
-    result = await get_client().get_bgp_routes(router, vrf, address_family)
+    result = await get_client().get_bgp_routes(router, vrf, address_family, prefix, limit)
     return json.dumps(result, indent=2)
 
 
@@ -2725,6 +2922,7 @@ async def get_bgp_advertised_routes(
     neighbor: str,
     vrf: str = "default",
     address_family: str = "ipv4",
+    prefix: str | None = None,
 ) -> str:
     """Get BGP routes advertised to a specific neighbor — equivalent to
     'show bgp neighbors <neighbor> advertised-routes'.
@@ -2739,8 +2937,9 @@ async def get_bgp_advertised_routes(
         neighbor:       Neighbor IP address (required).
         vrf:            VRF name. Default 'default'.
         address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+        prefix:         (optional) Filter to prefixes containing this string.
     """
-    result = await get_client().get_bgp_advertised_routes(router, neighbor, vrf, address_family)
+    result = await get_client().get_bgp_advertised_routes(router, neighbor, vrf, address_family, prefix)
     return json.dumps(result, indent=2)
 
 
@@ -2750,6 +2949,7 @@ async def get_bgp_received_routes(
     neighbor: str,
     vrf: str = "default",
     address_family: str = "ipv4",
+    prefix: str | None = None,
 ) -> str:
     """Get BGP routes received from a specific neighbor — equivalent to
     'show bgp neighbors <neighbor> received-routes'.
@@ -2764,8 +2964,9 @@ async def get_bgp_received_routes(
         neighbor:       Neighbor IP address (required).
         vrf:            VRF name. Default 'default'.
         address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
+        prefix:         (optional) Filter to prefixes containing this string.
     """
-    result = await get_client().get_bgp_received_routes(router, neighbor, vrf, address_family)
+    result = await get_client().get_bgp_received_routes(router, neighbor, vrf, address_family, prefix)
     return json.dumps(result, indent=2)
 
 
@@ -2798,45 +2999,6 @@ async def get_bgp_neighbors(
     result = await get_client().get_bgp_neighbors(router, vrf, address_family, neighbor)
     return json.dumps(result, indent=2)
 
-
-@mcp.tool()
-async def get_source_nat_utilization(router: str, node: str) -> str:
-    """Get source NAT pool utilization for a router node.
-
-    STUB: Source NAT pool utilization is not yet exposed via the SSR REST or
-    GraphQL APIs. This tool returns an unavailable marker so health check
-    workflows can handle it gracefully. When this data becomes available via
-    the API, this tool will be updated to return actual utilization.
-
-    Source NAT pool exhaustion causes new sessions requiring NAT to fail
-    even when routing and service paths are healthy.
-
-    Args:
-        router: Router name (required).
-        node:   Node name (required).
-    """
-    data = await get_client().get_source_nat_utilization(router, node)
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool()
-async def get_waypoint_utilization(router: str, node: str) -> str:
-    """Get SVR waypoint pool utilization for a router node.
-
-    STUB: Waypoint pool utilization is not yet exposed via the SSR REST or
-    GraphQL APIs. This tool returns an unavailable marker so health check
-    workflows can handle it gracefully. When this data becomes available via
-    the API, this tool will be updated to return actual utilization.
-
-    Waypoint pool exhaustion prevents new SVR sessions from being established
-    even when peer paths are up and BFD is healthy.
-
-    Args:
-        router: Router name (required).
-        node:   Node name (required).
-    """
-    data = await get_client().get_waypoint_utilization(router, node)
-    return json.dumps(data, indent=2)
 
 
 @mcp.tool()
@@ -3391,8 +3553,6 @@ Then call **in parallel**:
 - `get_capacity` (router + node)
 - `get_idp_status` (router + node)
 - `get_resource_allocation` (router + node)
-- `get_source_nat_utilization` (router + node)
-- `get_waypoint_utilization` (router + node)
 
 If `get_system_state` returns anything other than `RUNNING`, also call
 `get_system_processes` (router + node).
@@ -3444,8 +3604,6 @@ Otherwise report: engine state, security package accessibility
 (`securityPackages.accesible`), network reachability (`networks[].pingable`), pod
 state, and SPU CPU/memory/flow utilization. Flag any failures.
 
-Silently skip `get_source_nat_utilization` and `get_waypoint_utilization` results
-if they return `available: false`.
 """
 
 
@@ -3535,8 +3693,6 @@ Call **in parallel** (router + node):
 - `get_capacity` — FIB, flow table, action pool utilization
 - `get_node_utilization` — CPU, memory, disk
 - `get_resource_allocation` — core assignment (identifies IDP-dedicated cores)
-- `get_source_nat_utilization` — source NAT port pool (skip silently if `available: false`)
-- `get_waypoint_utilization` — waypoint port pool (skip silently if `available: false`)
 
 **Interpret:**
 - `get_session_processor_utilization`: if state is `High` or any thread CPU is
