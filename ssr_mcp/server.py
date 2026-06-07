@@ -137,7 +137,7 @@ Understanding this prevents misdiagnosis.
     `fib_lookup`
   - Completely broken (cache may be empty) → `get_dropped_packets`
   - App-id not enabled → ask user for IP/port
-- Domain name → `app_id_lookup` domain mode (requires `has_http_https`)
+- Domain name → `app_id_domain_lookup` (requires `has_http_https`)
 - All else fails → `get_dropped_packets`
 
 ## Slow traffic investigation
@@ -882,11 +882,11 @@ async def get_router_info(router: str) -> str:
                     valid (has_module, has_http_https)
 
     app_id tool families:
-      has_module     — get_app_id_modules, get_application_names,
-                       app_id_lookup (address mode)
+      has_module     — get_application_names,
+                       app_id_address_lookup
       has_http_https — get_app_id_cache, get_application_series,
-                       get_web_filtering_state, get_app_id_categories,
-                       app_id_lookup (address and domain modes)
+                       get_web_filtering_info,
+                       app_id_address_lookup, app_id_domain_lookup
 
     Args:
         router: Router name (required).
@@ -1334,21 +1334,6 @@ async def trace_session(session_uuid: str) -> str:
 
 
 @mcp.tool()
-async def get_app_id_modules(router: str, node: str) -> str:
-    """List the application identification modules registered and running
-    on a router node.
-
-    Requires: app-id with 'module' mode — check app_id.has_module in get_router_info.
-
-    Args:
-        router: Router name (required).
-        node:   Node name (required).
-    """
-    data = await get_client().get_app_id_modules(router, node)
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool()
 async def get_application_names(
     router: str,
     node: str,
@@ -1358,6 +1343,9 @@ async def get_application_names(
     IP tuples resolved for each application name.
 
     Requires: app-id with 'module' mode — check app_id.has_module in get_router_info.
+
+    For routers with http/https app-id mode, use get_app_id_cache(summarize=True)
+    for an equivalent view from HTTP/HTTPS inspection.
 
     Args:
         router: Router name (required).
@@ -1369,75 +1357,77 @@ async def get_application_names(
 
 
 @mcp.tool()
-async def get_web_filtering_state(router: str, node: str) -> str:
-    """Get the web filtering enabled/disabled state for a router node.
+async def get_web_filtering_info(router: str, node: str) -> str:
+    """Get web filtering state and the full list of categories for a router node.
 
     Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
+    Returns both the enabled/disabled state and the list of known categories in a
+    single call.
 
     Args:
         router: Router name (required).
         node:   Node name (required).
     """
-    data = await get_client().get_web_filtering_state(router, node)
+    data = await get_client().get_web_filtering_info(router, node)
     return json.dumps(data, indent=2)
 
 
 @mcp.tool()
-async def get_app_id_categories(router: str, node: str) -> str:
-    """List the application categories known to the SSR for web filtering.
-
-    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
-
-    Args:
-        router: Router name (required).
-        node:   Node name (required).
-    """
-    data = await get_client().get_app_id_categories(router, node)
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool()
-async def app_id_lookup(
+async def app_id_address_lookup(
     router: str,
     node: str,
-    mode: str = "address",
-    ip: str | None = None,
-    port: int | None = None,
-    protocol: str | None = None,
-    domain: str | None = None,
+    ip: str,
+    port: int,
+    protocol: str,
 ) -> str:
-    """Look up the application classification for a destination. Returns the
-    application, category, and domain/URL that app-id would resolve.
+    """Look up the application classification for a destination IP, port, and protocol.
+    Returns the application, category, and domain/URL that app-id would resolve.
 
     Requires: app-id enabled — check app_id.enabled in get_router_info.
-    Domain mode additionally requires has_http_https.
 
-    Two modes:
-      'address' — looks up by destination IP, port, and protocol.
-                  Requires: ip, port, protocol.
-                  Example: ip='1.1.1.1', port=53, protocol='udp'
-
-      'domain'  — looks up by domain name or URL.
-                  Requires: domain.
-                  Requires http or https app-id mode.
-                  Examples: domain='www.youtube.com'
-                            domain='http://192.168.1.5/index.html'
-
-    Cache miss behaviour: if the destination has not been seen before, the
-    lookup will return no result but will trigger the app-id engine to
-    classify it. Call this tool a second time for the same destination and
-    the result should be populated from the newly created cache entry.
+    Cache miss behaviour: if the destination has not been seen before, the lookup
+    will return no result but will trigger the app-id engine to classify it. Call
+    this tool a second time for the same destination and the result should be
+    populated from the newly created cache entry.
 
     Args:
         router:   Router name (required).
         node:     Node name (required).
-        mode:     'address' (default) or 'domain'.
-        ip:       Destination IP — required for address mode.
-        port:     Destination port — required for address mode.
-        protocol: Protocol ('udp', 'tcp') — required for address mode.
-        domain:   Domain name or URL — required for domain mode.
+        ip:       Destination IP address.
+        port:     Destination port number.
+        protocol: Protocol — 'tcp' or 'udp'.
     """
-    data = await get_client().app_id_lookup(router, node, mode, ip, port, protocol, domain)
+    data = await get_client().app_id_address_lookup(router, node, ip, port, protocol)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def app_id_domain_lookup(
+    router: str,
+    node: str,
+    domain: str,
+) -> str:
+    """Look up the application classification for a domain name or URL.
+    Returns the application and category that app-id would resolve.
+
+    Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+
+    Accepts a bare domain name or a full URL:
+      domain='www.youtube.com'
+      domain='http://192.168.1.5/index.html'
+
+    Cache miss behaviour: if the domain has not been seen before, the lookup
+    will return no result but will trigger the app-id engine to classify it. Call
+    this tool a second time for the same domain and the result should be
+    populated from the newly created cache entry.
+
+    Args:
+        router: Router name (required).
+        node:   Node name (required).
+        domain: Domain name or full URL to look up.
+    """
+    data = await get_client().app_id_domain_lookup(router, node, domain)
     return json.dumps(data, indent=2)
 
 
@@ -1992,52 +1982,80 @@ async def get_system_processes(
 async def get_app_id_cache(
     router: str,
     node: str | None = None,
+    application: str | None = None,
     cache: str = "address",
     limit: int = 500,
-    summarize: bool = False,
+    summarize: bool = True,
 ) -> str:
-    """Get the application identification cache — destination IPs, ports, and
-    protocols that have been classified by app-id based on traffic through the
-    router, along with the resolved application, category, and domain/URL.
+    """Get the application identification cache — application names classified
+    by app-id based on traffic through the router.
 
     Requires: app-id with 'http' or 'https' mode — check app_id.has_http_https in get_router_info.
+    For module-mode routers use get_application_names instead.
 
-    WARNING: On an active router the cache can contain tens of thousands of
-    entries. Use summarize=True for broad questions, or keep the default limit
-    and pair summarize=False with a specific known application. Only pass
-    limit=0 (no limit) when you explicitly need the full raw cache.
+    Default (summarize=True): returns unique application names merged across
+    both the address cache (IP+port+protocol → app) and the domain cache
+    (domain name → app), sorted by frequency. Use this to discover what
+    applications the router has seen.
 
-    Use summarize=True for broad questions ("what apps are in use?") to get a
-    ranked count by application and category instead of raw entries.
+    Pass application='Teams' to return raw address-cache entries for a specific
+    application — the dest IP, port, and protocol values can be fed into
+    fib_lookup to trace connectivity. If no entries are returned, the
+    application may not be in the sampled window; try increasing limit, or
+    use get_dropped_packets if connectivity is completely broken.
 
-    Use summarize=False with cache='address' to find the destination IPs,
-    ports, and protocols associated with a specific application name — filter
-    the results by the application field and feed matching entries into
-    fib_lookup. Note: there is no server-side application filter; filtering
-    happens on the returned entries. This is most useful for transient failures
-    where the application was previously working and cache entries still exist.
-    If connectivity is completely broken and sessions never established, the
-    cache may be empty for that application — use get_dropped_packets instead.
+    The address cache may contain tens of thousands of entries on an active
+    router; limit=500 is a sample. When summarizing, both address and domain
+    caches are each sampled up to this limit.
 
     Args:
-        router:    Router name (required).
-        node:      (optional) Limit to a specific node.
-        cache:     Cache type. Known values: 'address', 'domain', 'url'.
-                   Default 'address'.
-        limit:     Max entries to fetch before summarising or returning.
-                   Default 500. Pass a larger value or 0 for no limit only
-                   when you need comprehensive raw data.
-        summarize: When True, return per-application counts sorted by
-                   frequency instead of raw entries. Default False.
+        router:      Router name (required).
+        node:        (optional) Limit to a specific node.
+        application: (optional) Case-insensitive substring filter. When set,
+                     returns raw cache entries matching this application name.
+                     Use cache='domain' to search domain entries instead of
+                     address entries.
+        cache:       Cache type for raw or application-filtered queries.
+                     Default 'address' (IP+port+protocol entries).
+                     'domain' — resolved domain names.
+                     'url'    — full URLs (often unclassified; limited value).
+                     Ignored when summarize=True and application is not set.
+        limit:       Max entries to fetch per cache. Default 500.
+        summarize:   When True (default), return unique application names merged
+                     across address and domain caches. When False, return raw
+                     entries from the specified cache type.
     """
+    client = get_client()
     actual_limit = limit if limit > 0 else None
-    entries = await get_client().get_app_id_cache(router, node, cache, actual_limit)
+
+    if application is not None:
+        entries = await client.get_app_id_cache(router, node, cache, actual_limit)
+        filtered = [
+            e for e in entries
+            if application.lower() in (e.get("application") or "").lower()
+        ]
+        return json.dumps(
+            {
+                "application_filter": application,
+                "cache": cache,
+                "entries_sampled": len(entries),
+                "count": len(filtered),
+                "entries": filtered,
+            },
+            indent=2,
+        )
 
     if not summarize:
+        entries = await client.get_app_id_cache(router, node, cache, actual_limit)
         return json.dumps({"count": len(entries), "app_id_cache": entries}, indent=2)
 
+    addr_entries, domain_entries = await asyncio.gather(
+        client.get_app_id_cache(router, node, "address", actual_limit),
+        client.get_app_id_cache(router, node, "domain", actual_limit),
+    )
+
     counts: dict[tuple, int] = {}
-    for e in entries:
+    for e in addr_entries + domain_entries:
         key = (e.get("application") or "unknown", e.get("category") or "unknown", e.get("subCategory") or "")
         counts[key] = counts.get(key, 0) + 1
 
@@ -2052,7 +2070,8 @@ async def get_app_id_cache(
 
     return json.dumps(
         {
-            "entries_sampled": len(entries),
+            "address_entries_sampled": len(addr_entries),
+            "domain_entries_sampled": len(domain_entries),
             "application_count": len(applications),
             "applications": applications,
         },
@@ -3928,9 +3947,9 @@ Match the user-provided destination description using the first rule that applie
 | Destination description | Resolution |
 |-------------------------|------------|
 | Named service (e.g. "internet", "corporate-vpn") | `list_services` to confirm the service name, then `list_service_paths` to check path health; also do FIB lookup if you have source details |
-| Application name (e.g. "Teams", "Zoom") and `has_http_https` is true | `get_app_id_cache` (summarize=False) filtered client-side by application name → extract dest IP, port, protocol for FIB lookup; if cache is empty fall back to `get_dropped_packets` filtered by the known source IP |
+| Application name (e.g. "Teams", "Zoom") and `has_http_https` is true | `get_app_id_cache(application='<name>')` → extract dest IP, port, protocol for FIB lookup; if no entries returned fall back to `get_dropped_packets` filtered by the known source IP |
 | Application name and `has_http_https` is false | App-id not active — ask user for destination IP and port |
-| Domain name and `has_http_https` is true | `app_id_lookup` in domain mode |
+| Domain name and `has_http_https` is true | `app_id_domain_lookup` |
 | Domain name and `has_http_https` is false | Ask user for destination IP and port |
 | IP address | Use directly |
 | Unknown | Fall back: call `get_dropped_packets` (filtered by source IP if known) and skip the FIB lookup — go straight to Step 7 |

@@ -255,11 +255,6 @@ class SSRClient:
     async def get_software_version(self) -> dict:
         return await self._get("/api/software/version", params={"detail": "true"})
 
-    async def get_app_id_modules(self, router: str, node: str) -> list:
-        return await self._get(
-            f"/api/v1/router/{router}/node/{node}/applicationIdModules/registration"
-        )
-
     async def get_application_names(
         self,
         router: str,
@@ -334,34 +329,35 @@ class SSRClient:
                 return None
             raise
 
-    async def get_web_filtering_state(self, router: str, node: str) -> dict:
-        return await self._get(
-            f"/api/v1/router/{router}/node/{node}/applications/state"
+    async def get_web_filtering_info(self, router: str, node: str) -> dict:
+        state, categories = await asyncio.gather(
+            self._get(f"/api/v1/router/{router}/node/{node}/applications/state"),
+            self._get(f"/api/v1/router/{router}/node/{node}/applications/categories"),
         )
+        return {"state": state, "categories": categories}
 
-    async def get_app_id_categories(self, router: str, node: str) -> list:
-        return await self._get(
-            f"/api/v1/router/{router}/node/{node}/applications/categories"
-        )
-
-    async def app_id_lookup(
+    async def app_id_address_lookup(
         self,
         router: str,
         node: str,
-        mode: str = "address",
-        ip: str | None = None,
-        port: int | None = None,
-        protocol: str | None = None,
-        domain: str | None = None,
+        ip: str,
+        port: int,
+        protocol: str,
     ) -> dict:
-        params: dict = {"mode": mode}
-        if mode == "address":
-            params.update({"ip": ip, "port": port, "protocol": protocol})
-        else:
-            params["domain"] = domain
         return await self._get(
             f"/api/v1/router/{router}/node/{node}/appIdLookup",
-            params=params,
+            params={"mode": "address", "ip": ip, "port": port, "protocol": protocol},
+        )
+
+    async def app_id_domain_lookup(
+        self,
+        router: str,
+        node: str,
+        domain: str,
+    ) -> dict:
+        return await self._get(
+            f"/api/v1/router/{router}/node/{node}/appIdLookup",
+            params={"mode": "domain", "domain": domain},
         )
 
     async def get_session_processor_utilization(self, router: str, node: str) -> dict:

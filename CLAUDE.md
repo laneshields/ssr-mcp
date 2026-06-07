@@ -230,10 +230,10 @@ Understanding how packets are processed helps interpret tool output correctly.
 
 - Named service ("internet", "corporate-vpn") → `list_services` then `list_service_paths`
 - Application name ("Teams", "Zoom"):
-  - `has_http_https` enabled → `get_app_id_cache` (address cache, `summarize=False`) filtered by application name → dest IP/port/protocol → `fib_lookup`
+  - `has_http_https` enabled → `get_app_id_cache(application='<name>')` → dest IP/port/protocol → `fib_lookup`
   - Completely broken (cache may be empty) → `get_dropped_packets`
   - App-id not enabled → ask user for IP/port
-- Domain name → `app_id_lookup` domain mode (requires `has_http_https`)
+- Domain name → `app_id_domain_lookup` (requires `has_http_https`)
 - All else fails → `get_dropped_packets`
 
 ## Metric interpretation

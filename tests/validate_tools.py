@@ -657,21 +657,13 @@ async def test_find_sessions(c: SSRClient, ctx: TestContext):
 # ---------------------------------------------------------------------------
 
 @register(requires=["has_module"])
-async def test_get_app_id_modules(c: SSRClient, ctx: TestContext):
-    r = await c.get_app_id_modules(ctx.router, ctx.node)
-    assert isinstance(r, (list, dict))
-
-@register(requires=["has_module"])
 async def test_get_application_names(c: SSRClient, ctx: TestContext):
     r = await c.get_application_names(ctx.router, ctx.node)
     assert isinstance(r, (list, dict))
 
 @register(requires=["has_app_id"])
-async def test_app_id_lookup_address(c: SSRClient, ctx: TestContext):
-    r = await c.app_id_lookup(
-        ctx.router, ctx.node,
-        mode="address", ip="8.8.8.8", port=53, protocol="udp",
-    )
+async def test_app_id_address_lookup(c: SSRClient, ctx: TestContext):
+    r = await c.app_id_address_lookup(ctx.router, ctx.node, "8.8.8.8", 53, "udp")
     assert isinstance(r, dict)
 
 # ---------------------------------------------------------------------------
@@ -679,23 +671,24 @@ async def test_app_id_lookup_address(c: SSRClient, ctx: TestContext):
 # ---------------------------------------------------------------------------
 
 @register(requires=["has_http_https"])
-async def test_app_id_lookup_domain(c: SSRClient, ctx: TestContext):
+async def test_app_id_domain_lookup(c: SSRClient, ctx: TestContext):
     # {} is a valid result on cache miss; the lookup triggers classification
-    r = await c.app_id_lookup(
-        ctx.router, ctx.node,
-        mode="domain", domain="www.google.com",
-    )
+    r = await c.app_id_domain_lookup(ctx.router, ctx.node, "www.google.com")
     assert isinstance(r, dict)
 
 @register(requires=["has_http_https"])
-async def test_get_web_filtering_state(c: SSRClient, ctx: TestContext):
-    r = await c.get_web_filtering_state(ctx.router, ctx.node)
-    assert isinstance(r, (list, dict))
+async def test_get_web_filtering_info(c: SSRClient, ctx: TestContext):
+    r = await c.get_web_filtering_info(ctx.router, ctx.node)
+    assert isinstance(r, dict)
+    assert "state" in r
+    assert "categories" in r
 
 @register(requires=["has_http_https"])
-async def test_get_app_id_categories(c: SSRClient, ctx: TestContext):
-    r = await c.get_app_id_categories(ctx.router, ctx.node)
-    assert isinstance(r, (list, dict))
+async def test_get_app_id_cache(c: SSRClient, ctx: TestContext):
+    addr = await c.get_app_id_cache(ctx.router, ctx.node, "address", limit=10)
+    assert isinstance(addr, list)
+    domain = await c.get_app_id_cache(ctx.router, ctx.node, "domain", limit=10)
+    assert isinstance(domain, list)
 
 @register(requires=["has_http_https"])
 async def test_get_application_series(c: SSRClient, ctx: TestContext):
