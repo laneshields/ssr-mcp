@@ -2374,13 +2374,18 @@ class SSRClient:
         vrf: str = "default",
         address_family: str = "ipv4",
         prefix: str | None = None,
+        limit: int | None = None,
     ) -> dict:
         params = {"addressFamily": address_family, "neighborAddress": neighbor, "vrf": vrf}
         result = await self._get(
             f"/api/v1/router/{router}/routing/bgp/neighbors/advertised-routes", params=params
         )
+        routes = result.get("routes", [])
         if prefix:
-            result["routes"] = [r for r in result.get("routes", []) if prefix in r.get("prefix", "")]
+            routes = [r for r in routes if prefix in r.get("prefix", "")]
+        if limit is not None:
+            routes = routes[:limit]
+        result["routes"] = routes
         return result
 
     async def get_bgp_received_routes(
@@ -2390,13 +2395,18 @@ class SSRClient:
         vrf: str = "default",
         address_family: str = "ipv4",
         prefix: str | None = None,
+        limit: int | None = None,
     ) -> dict:
         params = {"addressFamily": address_family, "neighborAddress": neighbor, "vrf": vrf}
         result = await self._get(
             f"/api/v1/router/{router}/routing/bgp/neighbors/received-routes", params=params
         )
+        routes = result.get("routes", [])
         if prefix:
-            result["routes"] = [r for r in result.get("routes", []) if prefix in r.get("prefix", "")]
+            routes = [r for r in routes if prefix in r.get("prefix", "")]
+        if limit is not None:
+            routes = routes[:limit]
+        result["routes"] = routes
         return result
 
     async def get_bgp_neighbors(

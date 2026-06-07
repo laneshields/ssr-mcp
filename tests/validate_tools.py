@@ -270,9 +270,11 @@ async def test_get_software_version(c: SSRClient, ctx: TestContext):
     assert r
 
 @register()
-async def test_get_router(c: SSRClient, ctx: TestContext):
-    r = await c.get_router(ctx.router)
-    assert r
+async def test_get_routers(c: SSRClient, ctx: TestContext):
+    r = await c.get_routers()
+    assert isinstance(r, list) and len(r) > 0
+    names = [entry.get("name") for entry in r]
+    assert ctx.router in names
 
 @register()
 async def test_get_router_health(c: SSRClient, ctx: TestContext):
@@ -524,8 +526,9 @@ async def test_get_fragmentation_stats(c: SSRClient, ctx: TestContext):
     assert "ipv4_dont_fragment_drop" in r["sent"]
     assert "ipv4_packets_fragmented" in r["sent"]
     assert "successfully_reassembled" in r["received"]
-    assert all(isinstance(v, int) for v in r["sent"].values())
-    assert all(isinstance(v, int) for v in r["received"].values())
+    assert all(isinstance(v, dict) for v in r["sent"].values())
+    assert all(isinstance(v, dict) for v in r["received"].values())
+    assert "total_change" in r["sent"]["ipv4_dont_fragment_drop"]
 
 @register()
 async def test_get_top_sources(c: SSRClient, ctx: TestContext):

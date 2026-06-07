@@ -2,6 +2,7 @@ import asyncio
 import collections
 import functools
 import inspect
+import ipaddress
 import json
 import os
 import pathlib
@@ -67,7 +68,7 @@ _GUIDANCE = """# SSR MCP Operational Guidance
 
 | Mode | Description |
 |---|---|
-| conductor | SSR_HOST is a conductor. All managed routers accessible by name via `router:` param. Conductor-only tools available (`get_assets`, `find_sessions`). |
+| conductor | SSR_HOST is a conductor. All managed routers accessible by name via `router:` param. Conductor-only tools available (`get_assets`, `trace_session`). |
 | router-managed | Connected directly to a conductor-managed router. Only local device accessible. Conductor-only tools unavailable. |
 | router-cloud | Mist/cloud-managed router. No on-premises conductor. |
 | router-standalone | Standalone router with no management plane. |
@@ -433,9 +434,9 @@ _TRIAGE_CATEGORIES: dict[str, dict] = {
         "workflow": [
             "1. get_sessions (with source/dest filter if known).",
             "2. get_session on a specific UUID for full detail.",
-            "3. find_sessions in conductor mode for cross-router search.",
+            "3. trace_session in conductor mode to find all legs of an SVR session by UUID.",
         ],
-        "tools": ["get_sessions", "get_session", "find_sessions"],
+        "tools": ["get_sessions", "get_session", "trace_session"],
         "clarifying_questions": [
             "Do you have a source IP, destination, or session UUID?",
         ],
@@ -660,7 +661,7 @@ async def get_connection_info() -> str:
     Modes:
       conductor       — SSR_HOST is a conductor. All managed routers are
                         accessible by name via the router: parameter.
-                        Conductor-specific tools (get_assets, find_sessions)
+                        Conductor-specific tools (get_assets, trace_session)
                         are available. Use list_routers to enumerate managed
                         routers.
 
@@ -1140,10 +1141,14 @@ async def get_dhcp_leases(
     router: str | None = None,
     node: str | None = None,
     network_interface: str | None = None,
+    summarize: bool = True,
 ) -> str:
     """Get active DHCP leases across all DHCP-server interfaces on a router.
-    Returns a flat, clean list of leases — IP address, hostname, MAC address,
-    last-seen time, and lease lifetime — grouped by interface and subnet.
+
+    summarize=True (default): returns per-interface and per-subnet lease counts
+    only — no individual lease records. Use this to see how many clients are
+    on each subnet. Pass summarize=False to get full lease records (IP, hostname,
+    MAC, last-seen time, lease lifetime).
 
     Use this to answer questions like "what devices are on the network?",
     "what IP did host X get?", or "how many clients are connected to home_lan?".
@@ -1153,12 +1158,15 @@ async def get_dhcp_leases(
         node:              (optional) Limit to a specific node.
         network_interface: (optional) Limit to a single interface by name,
                            e.g. 'home_lan'. Strongly recommended when you
-                           know which interface to inspect — reduces response
-                           size significantly.
+                           know which interface to inspect.
+        summarize:         True (default): counts only. False: full lease records.
     """
     data = await get_client().get_network_interface_applications(router, node, network_interface)
     interfaces = _extract_dhcp_leases(data)
     total = sum(i["lease_count"] for i in interfaces)
+    if summarize:
+        slim = [{"interface": i["interface"], "subnet": i["subnet"], "lease_count": i["lease_count"]} for i in interfaces]
+        return json.dumps({"total_leases": total, "interfaces": slim}, indent=2)
     return json.dumps({"total_leases": total, "interfaces": interfaces}, indent=2)
 
 
@@ -1289,36 +1297,29 @@ async def get_sessions(
 
 
 @mcp.tool()
-async def find_sessions(
-    filter: str | None = None,
-    limit_per_router: int = 250,
-) -> str:
-    """Search for sessions across all routers simultaneously. Each result
-    includes _router and _node fields so you can see which router each
-    flow leg is on.
+async def trace_session(session_uuid: str) -> str:
+    """Trace all legs of an SVR session across the network by UUID.
 
-    Use this instead of get_sessions when:
-    - You have a session UUID and want to find all its legs across the network
-      (inter-router sessions appear on multiple routers)
-    - You don't know which router a session is on
-    - You want to see whether a flow is being handled end-to-end across
-      multiple hops
+    SVR (Secure Vector Routing) sessions appear on multiple routers — at
+    minimum the ingress router (originating the SVR tunnel) and the egress
+    router (terminating it). This tool finds every flow leg associated with
+    the UUID so you can see the full end-to-end path.
+
+    Obtain a session UUID first via get_sessions on the router where you
+    expect the session to originate, then call this tool to trace it.
+
+    Each result includes _router and _node so you can see which router and
+    node each leg is on.
 
     Context: conductor only — requires visibility into all managed routers.
 
     Args:
-        filter:           Filter expression — same syntax as get_sessions.
-                          Searching by session UUID is the most common use:
-                            '~"<uuid>"'  or  '"sessionUuid"="<uuid>"'
-        limit_per_router: Max sessions to fetch per router. Default 250.
-                          Raise this if you suspect results are being truncated
-                          on a busy network.
+        session_uuid: Session UUID to trace (required). Obtain from get_sessions.
 
     Note: routers that are offline or unreachable return a connectivity error
-    rather than an empty session list. These are reported in unreachable_routers
-    so you know which routers could not be searched.
+    rather than an empty result. These are reported in unreachable_routers.
     """
-    result = await get_client().find_sessions(filter, limit_per_router)
+    result = await get_client().find_sessions(f'"sessionUuid"="{session_uuid}"', 10)
     sessions = result["sessions"]
     unreachable = result["unreachable"]
     return json.dumps(
@@ -1468,7 +1469,7 @@ async def fib_lookup(
 
       tenant — provide the tenant name directly. Use when you already know
           the tenant from a prior tool call (e.g. get_dropped_packets output
-          or list_tenant_members).
+          or get_tenant_membership).
 
     The response includes the matched service name. Pass that to
     list_service_paths to check whether the service's paths are up.
@@ -1912,11 +1913,16 @@ async def get_events(
     event_types: list[str] | None = None,
     subtype: str | None = None,
     limit: int | None = None,
+    summarize: bool = True,
 ) -> str:
     """Get the event (audit log) history for a router.
 
     Defaults to the last 24 hours when from_time is not provided. Pass
     from_time explicitly to extend or narrow the window.
+
+    summarize=True (default): returns event counts grouped by type plus the
+    time period. Use this for a quick overview of activity. Pass summarize=False
+    to get individual event records.
 
     Args:
         router:      Router name (required).
@@ -1926,10 +1932,20 @@ async def get_events(
         event_types: (optional) List of AuditLogType values to filter by.
         subtype:     (optional) Event subtype to filter by.
         limit:       Max events to return. Omit to return all events in range.
+                     Applies in both summarize modes.
+        summarize:   True (default): counts by event type. False: raw event records.
     """
     if from_time is None:
         from_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     events = await get_client().get_events(router, from_time, to_time, event_types, subtype, limit)
+    if summarize:
+        by_type: dict[str, int] = {}
+        for e in events:
+            by_type[e.get("type", "UNKNOWN")] = by_type.get(e.get("type", "UNKNOWN"), 0) + 1
+        return json.dumps(
+            {"count": len(events), "period": {"from": from_time, "to": to_time}, "by_type": by_type},
+            indent=2,
+        )
     return json.dumps({"count": len(events), "events": events}, indent=2)
 
 
@@ -2049,15 +2065,31 @@ async def get_arp(
     router: str,
     node: str,
     limit: int | None = None,
+    summarize: bool = True,
 ) -> str:
     """Get the ARP table for a node.
 
+    summarize=True (default): returns total entry count grouped by device
+    interface with per-state breakdowns (REACHABLE, STALE, etc.). Pass
+    summarize=False to get individual ARP records.
+
     Args:
-        router: Router name (required).
-        node:   Node name (required).
-        limit:  Max entries to return. Omit to return all entries.
+        router:    Router name (required).
+        node:      Node name (required).
+        limit:     Max entries to return. Omit to return all entries.
+        summarize: True (default): counts by interface and state. False: raw ARP records.
     """
     entries = await get_client().get_arp(router, node, limit)
+    if summarize:
+        by_iface: dict[str, dict] = {}
+        for e in entries:
+            iface = e.get("deviceInterface", "unknown")
+            state = e.get("state", "UNKNOWN")
+            if iface not in by_iface:
+                by_iface[iface] = {"count": 0, "states": {}}
+            by_iface[iface]["count"] += 1
+            by_iface[iface]["states"][state] = by_iface[iface]["states"].get(state, 0) + 1
+        return json.dumps({"total": len(entries), "by_interface": by_iface}, indent=2)
     return json.dumps({"count": len(entries), "arp": entries}, indent=2)
 
 
@@ -2194,21 +2226,150 @@ async def get_capacity(
 
 
 @mcp.tool()
-async def list_tenant_members(
+async def get_tenant_membership(
     router: str,
     node: str,
-    limit: int | None = None,
+    summarize: bool = True,
+    include_global: bool = False,
+    tenant: str | None = None,
+    network_interface: str | None = None,
+    device_interface: str | None = None,
+    vlan: int | None = None,
+    source_ip: str | None = None,
 ) -> str:
-    """List tenant membership entries for a node — shows which source IP
-    prefixes, VLANs, and interfaces are assigned to each tenant.
+    """Show tenant membership rules for a node and look up how traffic is classified.
+
+    Tenant classification is step 1 of SSR traffic processing: the source IP
+    and ingress interface are matched against membership rules to assign a tenant,
+    which is then used for FIB lookup.
+
+    **Modes:**
+
+    - No filter params: list or summarize all membership entries.
+    - tenant=: show interfaces and prefixes assigned to that tenant.
+    - network_interface= (or device_interface= + vlan=): show all tenants and
+      prefixes on that interface.
+    - interface + source_ip=: LPM lookup — returns the specific tenant that
+      would classify traffic from source_ip arriving on that interface.
+
+    summarize=True (default): groups entries by tenant name listing their
+    assigned interfaces and prefixes. Pass summarize=False for a flat list
+    of individual entries (projected to tenant, interface, prefix only).
+
+    <invalidTenant> entries are always suppressed. <global> entries are
+    suppressed by default (set include_global=True to include them in list
+    and summarize modes). For source_ip lookups, <global> is always considered
+    as the fallback match regardless of include_global.
+
+    Context: router
 
     Args:
-        router: Router name (required).
-        node:   Node name (required).
-        limit:  Max entries to return. Omit to return all entries.
+        router:            Router name (required).
+        node:              Node name (required).
+        summarize:         True (default): group by tenant. False: flat entry list.
+        include_global:    Include <global> tenant entries in list/summarize output.
+                           Default False.
+        tenant:            (optional) Filter to a specific tenant name.
+        network_interface: (optional) Filter by network-interface (logical) name.
+        device_interface:  (optional) Filter by device-interface (physical) name.
+        vlan:              (optional) VLAN tag; combined with device_interface.
+        source_ip:         (optional) Source IP for LPM tenant classification lookup.
+                           Requires network_interface or device_interface.
     """
-    entries = await get_client().get_tenant_members(router, node, limit)
-    return json.dumps({"count": len(entries), "tenant_members": entries}, indent=2)
+    if source_ip and not network_interface and not device_interface:
+        return json.dumps({"error": "source_ip requires network_interface or device_interface"}, indent=2)
+
+    entries = await get_client().get_tenant_members(router, node)
+
+    # Strip <invalidTenant> always
+    entries = [e for e in entries if e.get("tenantName") != "<invalidTenant>"]
+
+    # Apply interface filters
+    if network_interface:
+        entries = [e for e in entries if e.get("networkInterfaceName") == network_interface]
+    elif device_interface:
+        entries = [e for e in entries if e.get("devicePortName") == device_interface]
+        if vlan is not None:
+            entries = [e for e in entries if e.get("vlan") == vlan]
+
+    # Apply tenant filter
+    if tenant:
+        entries = [e for e in entries if e.get("tenantName") == tenant]
+
+    # LPM lookup
+    if source_ip:
+        try:
+            src = ipaddress.ip_address(source_ip)
+        except ValueError:
+            return json.dumps({"error": f"Invalid source_ip: {source_ip}"}, indent=2)
+
+        # Always include <global> entries in LPM matching as fallback
+        candidates = entries  # <invalidTenant> already stripped above
+        best_prefix_len = -1
+        best_match: dict | None = None
+        for e in candidates:
+            prefix_str = e.get("sourceIpPrefix")
+            if not prefix_str:
+                continue
+            try:
+                net = ipaddress.ip_network(prefix_str, strict=False)
+                if src in net and net.prefixlen > best_prefix_len:
+                    best_prefix_len = net.prefixlen
+                    best_match = e
+            except ValueError:
+                continue
+
+        if best_match:
+            iface = best_match.get("networkInterfaceName") or best_match.get("devicePortName")
+            return json.dumps(
+                {
+                    "match": {
+                        "tenant": best_match.get("tenantName"),
+                        "prefix": best_match.get("sourceIpPrefix"),
+                        "interface": iface,
+                    }
+                },
+                indent=2,
+            )
+        return json.dumps(
+            {
+                "match": None,
+                "message": (
+                    f"No tenant prefix covers {source_ip} on this interface"
+                    " — traffic would be assigned to <global> or dropped."
+                ),
+            },
+            indent=2,
+        )
+
+    # Suppress <global> for list/summarize unless requested
+    if not include_global:
+        entries = [e for e in entries if e.get("tenantName") != "<global>"]
+
+    if summarize:
+        by_tenant: dict[str, dict] = {}
+        for e in entries:
+            name = e.get("tenantName", "unknown")
+            if name not in by_tenant:
+                by_tenant[name] = {"interfaces": [], "prefixes": []}
+            iface = e.get("networkInterfaceName") or e.get("devicePortName")
+            if iface and iface not in by_tenant[name]["interfaces"]:
+                by_tenant[name]["interfaces"].append(iface)
+            pfx = e.get("sourceIpPrefix")
+            if pfx and pfx not in by_tenant[name]["prefixes"]:
+                by_tenant[name]["prefixes"].append(pfx)
+        return json.dumps({"total": len(entries), "by_tenant": by_tenant}, indent=2)
+
+    # Raw mode: project to 3 fields only
+    slim = [
+        {
+            "tenant": e.get("tenantName"),
+            "interface": e.get("networkInterfaceName") or e.get("devicePortName"),
+            "prefix": e.get("sourceIpPrefix"),
+        }
+        for e in entries
+    ]
+    return json.dumps({"count": len(slim), "entries": slim}, indent=2)
 
 
 _SERVICE_DETAIL_FIELDS = frozenset({"access", "transport", "serviceRoutes"})
@@ -3276,12 +3437,16 @@ async def get_bgp_advertised_routes(
     vrf: str = "default",
     address_family: str = "ipv4",
     prefix: str | None = None,
+    summarize: bool = True,
+    limit: int | None = None,
 ) -> str:
     """Get BGP routes advertised to a specific neighbor — equivalent to
     'show bgp neighbors <neighbor> advertised-routes'.
 
-    Returns each advertised prefix with next-hop, AS path, origin code,
-    metric, weight, and applied status symbols.
+    summarize=True (default): returns total route count and prefix counts
+    per unique next-hop. Use this when the neighbor has a large route table
+    (e.g. a full internet feed). Pass summarize=False for raw route records;
+    combine with prefix= or limit= to keep the response manageable.
 
     Context: router
 
@@ -3291,8 +3456,19 @@ async def get_bgp_advertised_routes(
         vrf:            VRF name. Default 'default'.
         address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
         prefix:         (optional) Filter to prefixes containing this string.
+        summarize:      True (default): counts by next-hop. False: raw route records.
+        limit:          (optional) Max routes to return in summarize=False mode.
     """
-    result = await get_client().get_bgp_advertised_routes(router, neighbor, vrf, address_family, prefix)
+    result = await get_client().get_bgp_advertised_routes(
+        router, neighbor, vrf, address_family, prefix, limit if not summarize else None
+    )
+    if summarize:
+        routes = result.get("routes", [])
+        next_hops: dict[str, int] = {}
+        for r in routes:
+            nh = r.get("nexthop") or r.get("nextHop") or "unknown"
+            next_hops[nh] = next_hops.get(nh, 0) + 1
+        return json.dumps({"total_routes": len(routes), "next_hops": next_hops}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -3303,12 +3479,16 @@ async def get_bgp_received_routes(
     vrf: str = "default",
     address_family: str = "ipv4",
     prefix: str | None = None,
+    summarize: bool = True,
+    limit: int | None = None,
 ) -> str:
     """Get BGP routes received from a specific neighbor — equivalent to
     'show bgp neighbors <neighbor> received-routes'.
 
-    Returns each received prefix with next-hop, AS path, origin code, metric,
-    weight, and applied status symbols (valid, best, etc.).
+    summarize=True (default): returns total route count and prefix counts
+    per unique next-hop. Use this when the neighbor has a large route table
+    (e.g. a full internet feed). Pass summarize=False for raw route records;
+    combine with prefix= or limit= to keep the response manageable.
 
     Context: router
 
@@ -3318,8 +3498,19 @@ async def get_bgp_received_routes(
         vrf:            VRF name. Default 'default'.
         address_family: Address family. Default 'ipv4'. Also: 'ipv6'.
         prefix:         (optional) Filter to prefixes containing this string.
+        summarize:      True (default): counts by next-hop. False: raw route records.
+        limit:          (optional) Max routes to return in summarize=False mode.
     """
-    result = await get_client().get_bgp_received_routes(router, neighbor, vrf, address_family, prefix)
+    result = await get_client().get_bgp_received_routes(
+        router, neighbor, vrf, address_family, prefix, limit if not summarize else None
+    )
+    if summarize:
+        routes = result.get("routes", [])
+        next_hops: dict[str, int] = {}
+        for r in routes:
+            nh = r.get("nexthop") or r.get("nextHop") or "unknown"
+            next_hops[nh] = next_hops.get(nh, 0) + 1
+        return json.dumps({"total_routes": len(routes), "next_hops": next_hops}, indent=2)
     return json.dumps(result, indent=2)
 
 
@@ -3765,7 +3956,7 @@ The SSR has no route for this traffic. It sends an ICMP network unreachable repl
 **FIB misses do not appear in `get_dropped_packets`** — do not call it here.
 
 Likely causes: missing service definition, incorrect tenant membership, or the source
-IP is not classified into the expected tenant. Check `list_tenant_members` for the
+IP is not classified into the expected tenant. Check `get_tenant_membership` for the
 resolved tenant (or ask the user which tenant should apply) and `list_services` to
 confirm the service exists and covers the destination.
 
