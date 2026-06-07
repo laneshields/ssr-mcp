@@ -2277,11 +2277,8 @@ class SSRClient:
         window_minutes: int = 30,
     ) -> list:
         import re as _re
-        now = datetime.now(timezone.utc)
-        start = (now - timedelta(minutes=window_minutes)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        end = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         body = {
-            "window": {"start": start, "end": end},
+            "window": {"start": f"now-{window_minutes * 60}", "end": "now"},
             "expand": ["address"],
         }
         url = f"/api/v1/router/{router}/node/{node}/applications/series"
@@ -2294,8 +2291,7 @@ class SSRClient:
             m = _re.search(r"maximum window size is (\d+)m", msg)
             if m:
                 max_min = int(m.group(1)) - 1
-                start = (now - timedelta(minutes=max_min)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                body["window"]["start"] = start
+                body["window"]["start"] = f"now-{max_min * 60}"
                 response = await self._http.post(url, headers=headers, json=body)
         response.raise_for_status()
         return response.json()
