@@ -720,32 +720,73 @@ async def test_summarize_app_series_fields(c: SSRClient, ctx: TestContext):
     )
 
 @register(requires=["has_http_https"])
-async def test_get_top_applications(c: SSRClient, ctx: TestContext):
+async def test_get_application_traffic(c: SSRClient, ctx: TestContext):
     with _inject_client(c):
-        result = json.loads(await _server.get_top_applications(
-            router=ctx.router, node=ctx.node, top_n=5, window_minutes=5
+        # view='top'
+        top = json.loads(await _server.get_application_traffic(
+            router=ctx.router, node=ctx.node, view="top", top_n=5, window_minutes=5
         ))
-    assert "applications" in result
-    assert "total_applications" in result
-    assert len(result["applications"]) <= 5
-    if result["applications"]:
-        app = result["applications"][0]
-        for field in ("name", "rx_bytes", "tx_bytes", "active_sessions", "unique_clients"):
-            assert field in app, f"get_top_applications missing field: {field}"
+    assert "applications" in top, "top view missing 'applications'"
+    assert "total_applications" in top, "top view missing 'total_applications'"
+    assert top["view"] == "top"
+    assert len(top["applications"]) <= 5
+    if top["applications"]:
+        app = top["applications"][0]
+        for field in ("name", "category", "rx_bytes", "tx_bytes", "active_sessions",
+                      "new_sessions", "unique_clients", "services", "next_hop_types", "svr_peers"):
+            assert field in app, f"top view missing field: {field}"
 
-@register(requires=["has_http_https"])
-async def test_get_application_tcp_health(c: SSRClient, ctx: TestContext):
     with _inject_client(c):
-        result = json.loads(await _server.get_application_tcp_health(
-            router=ctx.router, node=ctx.node, window_minutes=5, min_sessions=1
+        # view='tcp_health'
+        health = json.loads(await _server.get_application_traffic(
+            router=ctx.router, node=ctx.node, view="tcp_health", window_minutes=5, min_sessions=1
         ))
-    assert "applications" in result
-    assert "application_count" in result
-    if result["applications"]:
-        app = result["applications"][0]
-        for field in ("name", "tcp_retrans_from_server_pct", "tcp_retrans_from_client_pct",
-                      "avg_tcp_connection_ms", "avg_fwd_rtt_ms", "avg_rev_rtt_ms"):
-            assert field in app, f"get_application_tcp_health missing field: {field}"
+    assert "applications" in health, "tcp_health view missing 'applications'"
+    assert "application_count" in health, "tcp_health view missing 'application_count'"
+    assert health["view"] == "tcp_health"
+    if health["applications"]:
+        app = health["applications"][0]
+        for field in ("name", "category", "services", "tcp_retrans_from_server_pct",
+                      "tcp_retrans_from_client_pct", "avg_tcp_connection_ms",
+                      "avg_fwd_rtt_ms", "avg_rev_rtt_ms"):
+            assert field in app, f"tcp_health view missing field: {field}"
+
+    with _inject_client(c):
+        # view='clients'
+        clients = json.loads(await _server.get_application_traffic(
+            router=ctx.router, node=ctx.node, view="clients", top_n=5, window_minutes=5
+        ))
+    assert "clients" in clients, "clients view missing 'clients'"
+    assert "total_clients" in clients, "clients view missing 'total_clients'"
+    assert clients["view"] == "clients"
+    assert len(clients["clients"]) <= 5
+    if clients["clients"]:
+        cl = clients["clients"][0]
+        for field in ("client_ip", "tenant", "network_interface", "applications", "services",
+                      "rx_bytes", "tx_bytes", "active_sessions", "avg_fwd_rtt_ms", "avg_rev_rtt_ms"):
+            assert field in cl, f"clients view missing field: {field}"
+
+    # application= filter: scope top view to a name substring
+    if top["applications"]:
+        app_name = top["applications"][0]["name"]
+        with _inject_client(c):
+            filtered = json.loads(await _server.get_application_traffic(
+                router=ctx.router, node=ctx.node, view="top",
+                application=app_name[:4], window_minutes=5
+            ))
+        assert all(app_name[:4].lower() in a["name"].lower()
+                   for a in filtered["applications"]), "application filter not applied"
+
+    # client_ip= filter: scope clients view to a specific IP
+    if clients["clients"]:
+        ip = clients["clients"][0]["client_ip"]
+        with _inject_client(c):
+            ip_filtered = json.loads(await _server.get_application_traffic(
+                router=ctx.router, node=ctx.node, view="clients",
+                client_ip=ip, window_minutes=5
+            ))
+        assert all(ip in cl["client_ip"] for cl in ip_filtered["clients"]), \
+            "client_ip filter not applied"
 
 # ---------------------------------------------------------------------------
 # Tests — IDP
