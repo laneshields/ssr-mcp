@@ -12,6 +12,7 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from ssr_mcp.client import SSRClient
 
@@ -227,6 +228,9 @@ mcp = FastMCP(
     port=_PORT,
     instructions=_GUIDANCE,
 )
+
+_RO = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_LW = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 
 # ------------------------------------------------------------------
 # Tool-call logging
@@ -484,7 +488,7 @@ def _classify_query(question: str) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_LW)
 async def begin_query(question: str) -> str:
     """Log the user's question and return operational guidance.
 
@@ -534,7 +538,7 @@ async def begin_query(question: str) -> str:
     return triage_block + _GUIDANCE
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_guidance() -> str:
     """Return operational guidance for using this MCP server effectively.
 
@@ -546,7 +550,7 @@ async def get_guidance() -> str:
     return _GUIDANCE
 
 
-@mcp.tool()
+@mcp.tool(annotations=_LW)
 async def report_issue(
     tool: str,
     observation: str,
@@ -585,7 +589,7 @@ async def report_issue(
     return "Issue logged. Thank you — this helps improve the tools."
 
 
-@mcp.tool()
+@mcp.tool(annotations=_LW)
 async def report_feedback(
     complaint: str,
     what_went_wrong: str,
@@ -652,7 +656,7 @@ def get_client() -> SSRClient:
 # ------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_connection_info() -> str:
     """Identify the device SSR_HOST is connected to and determine which tools
     are applicable. Call this first in any session.
@@ -685,7 +689,7 @@ async def get_connection_info() -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def list_routers() -> str:
     """List all routers managed by the conductor, or the local router when
     connected directly to a standalone router.
@@ -704,7 +708,7 @@ async def list_routers() -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_alarms(router: str | None = None, node: str | None = None) -> str:
     """Retrieve active alarms.
 
@@ -726,7 +730,7 @@ async def get_alarms(router: str | None = None, node: str | None = None) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_router_health(
     router: str,
     node: str | None = None,
@@ -847,7 +851,7 @@ async def get_router_health(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_conductor_summary() -> str:
     """Get a compact health overview of the entire conductor deployment.
 
@@ -869,7 +873,7 @@ async def get_conductor_summary() -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_router_info(router: str) -> str:
     """Get static facts about a router: its nodes, software version, and
     application identification capability.
@@ -938,7 +942,7 @@ async def get_router_info(router: str) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_device_interfaces(
     router: str,
     node: str | None = None,
@@ -1114,7 +1118,7 @@ def _extract_dhcp_servers(data: dict) -> list[dict]:
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_dhcp_servers(
     router: str | None = None,
     node: str | None = None,
@@ -1138,7 +1142,7 @@ async def get_dhcp_servers(
     return json.dumps({"dhcp_server_count": len(servers), "interfaces": servers}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_dhcp_leases(
     router: str | None = None,
     node: str | None = None,
@@ -1172,7 +1176,7 @@ async def get_dhcp_leases(
     return json.dumps({"total_leases": total, "interfaces": interfaces}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_network_interfaces(
     router: str | None = None,
     node: str | None = None,
@@ -1222,7 +1226,7 @@ async def get_network_interfaces(
 # ------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_sessions(
     router: str,
     node: str | None = None,
@@ -1298,7 +1302,7 @@ async def get_sessions(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def trace_session(session_uuid: str) -> str:
     """Trace all legs of an SVR session across the network by UUID.
 
@@ -1335,7 +1339,7 @@ async def trace_session(session_uuid: str) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_application_names(
     router: str,
     node: str,
@@ -1358,7 +1362,7 @@ async def get_application_names(
     return json.dumps({"count": len(entries), "applications": entries}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_web_filtering_info(router: str, node: str) -> str:
     """Get web filtering state and the full list of categories for a router node.
 
@@ -1375,7 +1379,7 @@ async def get_web_filtering_info(router: str, node: str) -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def app_id_address_lookup(
     router: str,
     node: str,
@@ -1404,7 +1408,7 @@ async def app_id_address_lookup(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def app_id_domain_lookup(
     router: str,
     node: str,
@@ -1433,7 +1437,7 @@ async def app_id_domain_lookup(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def fib_lookup(
     router: str,
     node: str,
@@ -1490,7 +1494,7 @@ async def fib_lookup(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_fib(
     router: str,
     node: str,
@@ -1538,7 +1542,7 @@ async def get_fib(
     return json.dumps({"count": len(entries), "fib": entries}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def list_service_paths(
     router: str,
     node: str | None = None,
@@ -1569,7 +1573,7 @@ async def list_service_paths(
     return json.dumps({"count": len(paths), "service_paths": paths}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_software_version() -> str:
     """Get detailed software version information for the connected device,
     including build metadata beyond what get_connection_info provides.
@@ -1584,7 +1588,7 @@ async def get_software_version() -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_session_processor_utilization(router: str, node: str) -> str:
     """Get CPU utilization of the service area (session processor) threads.
 
@@ -1596,7 +1600,7 @@ async def get_session_processor_utilization(router: str, node: str) -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_resource_allocation(router: str, node: str) -> str:
     """Get forwarding core and hugepage memory allocation for a node.
 
@@ -1608,7 +1612,7 @@ async def get_resource_allocation(router: str, node: str) -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_vrfs(router: str, limit: int | None = None) -> str:
     """Get VRFs configured on a router.
 
@@ -1620,7 +1624,7 @@ async def get_vrfs(router: str, limit: int | None = None) -> str:
     return json.dumps({"count": len(entries), "vrfs": entries}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_top_sources(
     router: str | None = None,
     node: str | None = None,
@@ -1753,7 +1757,7 @@ def _parse_rib_summary(text: str) -> dict:
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_rib(
     router: str,
     summarize: bool = True,
@@ -1897,7 +1901,7 @@ async def get_rib(
     return json.dumps({"count": len(entries), "rib": entries}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_events(
     router: str,
     from_time: str | None = None,
@@ -1941,7 +1945,7 @@ async def get_events(
     return json.dumps({"count": len(events), "events": events}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_assets(asset_ids: list[str] | None = None) -> str:
     """Get asset status for onboarding and upgrades.
 
@@ -1958,7 +1962,7 @@ async def get_assets(asset_ids: list[str] | None = None) -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_system_processes(
     router: str | None = None,
     node: str | None = None,
@@ -1980,7 +1984,7 @@ async def get_system_processes(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_app_id_cache(
     router: str,
     node: str | None = None,
@@ -2081,7 +2085,7 @@ async def get_app_id_cache(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_arp(
     router: str,
     node: str,
@@ -2114,7 +2118,7 @@ async def get_arp(
     return json.dumps({"count": len(entries), "arp": entries}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_platform(
     router: str | None = None,
     node: str | None = None,
@@ -2138,7 +2142,7 @@ async def get_platform(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_system_services(
     router: str | None = None,
     node: str | None = None,
@@ -2159,7 +2163,7 @@ async def get_system_services(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_system_connectivity(
     router: str | None = None,
     node: str | None = None,
@@ -2182,7 +2186,7 @@ async def get_system_connectivity(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_system_state(
     router: str | None = None,
     node: str | None = None,
@@ -2207,7 +2211,7 @@ async def get_system_state(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_node_utilization(
     router: str,
     node: str | None = None,
@@ -2228,7 +2232,7 @@ async def get_node_utilization(
     return json.dumps({"nodes": nodes}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_capacity(
     router: str | None = None,
     node: str | None = None,
@@ -2246,7 +2250,7 @@ async def get_capacity(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_tenant_membership(
     router: str,
     node: str,
@@ -2396,7 +2400,7 @@ async def get_tenant_membership(
 _SERVICE_DETAIL_FIELDS = frozenset({"access", "transport", "serviceRoutes"})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def list_services(
     router: str,
     node: str | None = None,
@@ -2443,7 +2447,7 @@ async def list_services(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_session(
     session_id: str,
     router: str,
@@ -2465,7 +2469,7 @@ async def get_session(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def list_peer_paths(
     router: str | None = None,
     peer_name: str | None = None,
@@ -2526,7 +2530,7 @@ def _build_drop_filter(
     return {"version": "1.0", "rule": {"conjunction": "AND", "rules": rules}}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_dropped_packets(
     router: str,
     node: str,
@@ -2641,7 +2645,7 @@ async def get_dropped_packets(
 # ------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_running_config(
     router: str | None = None,
     subtree: str | None = None,
@@ -2967,7 +2971,7 @@ def _summarize_app_series_by_client(
     return sorted(result, key=lambda x: x["rx_bytes"] + x["tx_bytes"], reverse=True)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_application_traffic(
     router: str,
     node: str,
@@ -3138,7 +3142,7 @@ def _format_bps(bps: float) -> str:
     return f"{bps:.0f} bps"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def query_stats(
     router: str,
     stat_id: str,
@@ -3216,7 +3220,7 @@ async def query_stats(
     return json.dumps({"stat": stat_id, "count": len(results), "values": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_fragmentation_stats(router: str, window_minutes: int = 30) -> str:
     """Get IP fragmentation and reassembly activity for a router over a time window.
 
@@ -3259,7 +3263,7 @@ async def get_fragmentation_stats(router: str, window_minutes: int = 30) -> str:
     return json.dumps(await get_client().get_fragmentation_stats(router, window_minutes), indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def query_metrics(
     router: str,
     metric_id: str,
@@ -3403,7 +3407,7 @@ async def query_metrics(
     return json.dumps(summary, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_bgp_summary(
     router: str,
     vrf: str = "default",
@@ -3427,7 +3431,7 @@ async def get_bgp_summary(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_bgp_routes(
     router: str,
     vrf: str = "default",
@@ -3455,7 +3459,7 @@ async def get_bgp_routes(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_bgp_advertised_routes(
     router: str,
     neighbor: str,
@@ -3497,7 +3501,7 @@ async def get_bgp_advertised_routes(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_bgp_received_routes(
     router: str,
     neighbor: str,
@@ -3539,7 +3543,7 @@ async def get_bgp_received_routes(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_bgp_neighbors(
     router: str,
     vrf: str = "default",
@@ -3575,7 +3579,7 @@ async def get_bgp_neighbors(
 
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_idp_status(router: str, node: str) -> str:
     """Get IDP (Intrusion Detection and Prevention) status for a router node.
 
@@ -3688,7 +3692,7 @@ def _summarize_security_events(events: list) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_security_events(
     router: str,
     node: str,
@@ -3747,7 +3751,7 @@ async def get_security_events(
     return json.dumps([_clean_security_event(e) for e in data], indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def get_mist_info(router: str, node: str) -> str:
     """Return Mist/cloud management details for a router managed by Juniper Mist.
 
@@ -3771,7 +3775,7 @@ async def get_mist_info(router: str, node: str) -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 async def ping(
     router: str,
     node: str,
