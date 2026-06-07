@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import functools
 import inspect
 import json
@@ -1500,24 +1501,47 @@ async def fib_lookup(
 async def get_fib(
     router: str,
     node: str,
-    limit: int | None = None,
+    summarize: bool = True,
     vrf: str | None = None,
     ip_prefix: str | None = None,
+    tenant: str | None = None,
+    service: str | None = None,
+    limit: int | None = None,
 ) -> str:
     """Get the Forwarding Information Base (FIB) for a node — the resolved
     set of prefixes and next-hops the dataplane will actually use.
 
-    WARNING: Unfiltered calls may return thousands of entries. Use ip_prefix
-    or vrf to narrow results, or pass a limit.
+    By default returns a summary (total entry count plus breakdowns by service
+    and by tenant). Pass summarize=False to retrieve raw entries with optional
+    filtering.
+
+    Filters (vrf, ip_prefix, tenant, service) can be combined freely. vrf and
+    ip_prefix are applied server-side; tenant and service are applied
+    client-side after pagination.
 
     Args:
         router:    Router name (required).
         node:      Node name within that router (required).
-        limit:     Max entries to return. Omit to return all entries.
+        summarize: When True (default), return counts by service and tenant.
+                   When False, return raw FIB entries.
         vrf:       (optional) Filter by VRF name.
         ip_prefix: (optional) Filter by IP prefix, e.g. '10.0.0.0/8'.
+        tenant:    (optional) Filter entries to a specific tenant name.
+        service:   (optional) Filter entries to a specific service name.
+        limit:     Max raw entries to return (summarize=False only).
     """
-    entries = await get_client().get_fib(router, node, limit, vrf, ip_prefix)
+    entries = await get_client().get_fib(
+        router, node,
+        limit=None if summarize else limit,
+        vrf=vrf,
+        ip_prefix=ip_prefix,
+        tenant=tenant,
+        service=service,
+    )
+    if summarize:
+        by_service = dict(collections.Counter(e.get("service", "") for e in entries).most_common())
+        by_tenant = dict(collections.Counter(e.get("tenant", "") for e in entries).most_common())
+        return json.dumps({"total": len(entries), "by_service": by_service, "by_tenant": by_tenant}, indent=2)
     return json.dumps({"count": len(entries), "fib": entries}, indent=2)
 
 
@@ -1633,38 +1657,250 @@ async def get_top_sources(
     return json.dumps(data, indent=2)
 
 
+# SSR automatically creates two KNI (kernel network interface) devices that
+# bridge the Linux OS networking stack to the SSR forwarding plane.  They
+# carry fixed global IDs and appear in RIB next-hops but are not listed in
+# get_network_interfaces.
+_KNI_GIID_TO_NAME: dict[str, str] = {
+    "4294967294": "kni254",  # IPv4 management KNI (all SSR versions)
+    "4294967293": "kni253",  # IPv6 management KNI (SSR 7.0+)
+}
+
+
+async def _build_iface_map(router: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (giid_number→name, name→giid_string) for a router.
+
+    Combines the hardcoded kni254/kni253 entries with live results from
+    get_network_interfaces.  Either dict may be incomplete if the API call
+    fails; callers should fall back to the raw giid string on a miss.
+    """
+    giid_to_name: dict[str, str] = dict(_KNI_GIID_TO_NAME)
+    name_to_giid: dict[str, str] = {v: f"g{k}" for k, v in _KNI_GIID_TO_NAME.items()}
+    try:
+        raw = await get_client().get_network_interfaces(router)
+        dev_ifaces = (
+            raw.get("data", {})
+               .get("allRouters", {})
+               .get("nodes", [{}])[0]
+               .get("nodes", {})
+               .get("nodes", [{}])[0]
+               .get("deviceInterfaces", {})
+               .get("nodes", [])
+        )
+        for di in dev_ifaces:
+            for ni in di.get("networkInterfaces", {}).get("nodes", []):
+                gid = ni.get("globalId")
+                name = ni.get("name")
+                if gid is not None and name:
+                    giid_to_name[str(gid)] = name
+                    name_to_giid[name] = f"g{gid}"
+    except Exception:
+        pass
+    return giid_to_name, name_to_giid
+
+
+def _resolve_iface_name(name: str, giid_to_name: dict[str, str]) -> str:
+    """Resolve a giid string (e.g. 'g11') to its network-interface name.
+    Non-giid names (e.g. 'lo0', 'kni254') are returned unchanged.
+    """
+    if not name:
+        return name
+    m = re.match(r"^g(\d+)$", name)
+    if m:
+        return giid_to_name.get(m.group(1), name)
+    return name
+
+
+def _resolve_entries_ifaces(entries: list, giid_to_name: dict[str, str]) -> list:
+    """Replace raw giid interfaceNames in a list of RIB entries in-place."""
+    resolved = []
+    for entry in entries:
+        nhs = entry.get("nextHops")
+        if not nhs:
+            resolved.append(entry)
+            continue
+        new_nhs = []
+        for nh in nhs:
+            iface = nh.get("interfaceName")
+            if iface:
+                nh = {**nh, "interfaceName": _resolve_iface_name(iface, giid_to_name)}
+            new_nhs.append(nh)
+        resolved.append({**entry, "nextHops": new_nhs})
+    return resolved
+
+
+def _parse_rib_summary(text: str) -> dict:
+    result: dict = {}
+    current_af: str | None = None
+    current_vrf: str | None = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("IPv6 Address Family"):
+            current_af = "ipv6"
+        elif line.startswith("IP Address Family"):
+            current_af = "ipv4"
+        elif line.startswith("Route Source") and current_af:
+            m = re.search(r'\(vrf (\S+)\)', line)
+            current_vrf = m.group(1) if m else "default"
+            result.setdefault(current_vrf, {}).setdefault(current_af, {})
+        elif line.startswith("---") or line.startswith("Totals") or not current_vrf:
+            continue
+        else:
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    result[current_vrf][current_af][parts[0]] = {
+                        "routes": int(parts[1]),
+                        "fib": int(parts[2]) if len(parts) >= 3 else 0,
+                    }
+                except (ValueError, IndexError):
+                    pass
+    return result
+
+
 @mcp.tool()
 async def get_rib(
     router: str,
+    summarize: bool = True,
     vrf: str | None = None,
     ip: str | None = None,
+    next_hop: str | None = None,
     filter: str | None = None,
     sub_command: str | None = None,
     limit: int | None = None,
 ) -> str:
-    """Get all routes in the Routing Information Base (RIB) for a router.
-    Includes next-hops, protocol, distance, metric, uptime, and FIB selection.
+    """Get routes from the Routing Information Base (RIB) for a router.
 
-    WARNING: Unfiltered calls may return thousands of routes. Use ip or vrf
-    to narrow results.
+    Operates in five modes depending on which parameters are provided:
 
-    Passing a host address to ip (e.g. '192.168.1.50') returns the
-    longest-prefix match for that address, which is useful for determining
-    which interface traffic from an off-network source arrives on. Next-hop
-    interfaceName values use the internal giid format ('g2', 'g0', etc.) —
-    match the number against the globalId field in get_network_interfaces
-    output to resolve to the actual network interface name.
+    1. Summary (default, summarize=True, no ip/next_hop): returns route counts
+       by protocol per VRF for all address families. One fast API call —
+       safe to use even on routers with large BGP tables.
+
+    2. Prefix lookup (ip provided): returns all RIB entries for a specific
+       prefix or the longest-prefix match for a host address. Use this to
+       determine which protocol(s) have a route to a destination and what
+       next-hops each uses.
+
+    3. Next-hop overview (next_hop="*"): enumerates all unique next-hops —
+       interface names, IP gateways, and blackhole — with the count and list
+       of prefixes using each. Sorted by route count descending. Use this to
+       identify which next-hops carry the most routes and evaluate whether
+       route summarization could reduce the table size. A prefix appears under
+       every distinct next-hop value in its nextHops array (e.g. a recursive
+       BGP route with both a peer IP and a resolved interface will appear
+       under both).
+
+    4. Next-hop filter (next_hop=<value>): returns all prefixes that route
+       via a specific next-hop. Accepts:
+         - "blackhole"     — entries with a blackhole next-hop
+         - an IP address   — entries with that IP as a gateway
+         - an interface name (friendly name or raw giid) — entries via that
+           interface; both forms are accepted, e.g. "ge-0-1" or "g10"
+
+    5. Raw listing (summarize=False, no ip/next_hop): returns raw RIB entries
+       with optional vrf/filter/sub_command/limit controls.
+
+    Interface name resolution (modes 2–5):
+    All nextHops[].interfaceName values are automatically resolved from their
+    raw giid form (e.g. "g11") to the human-readable network interface name
+    (e.g. "ge-0-2"). Two special interfaces have fixed giid values and are
+    resolved without an API call:
+      - kni254 (g4294967294): IPv4 KNI — bridges Linux OS networking to the
+        SSR forwarding plane; present on all SSR versions.
+      - kni253 (g4294967293): IPv6 KNI — same purpose for IPv6; introduced
+        in SSR 7.0.
+    Giids with no matching network interface (e.g. VRF-internal or waypoint
+    interfaces) are left as-is.
+
+    Routing-engine interface names (e.g. "lo0") are not giids and are not
+    resolvable via get_network_interfaces. They are loopback or other
+    interfaces owned by the FRR routing process — most commonly the BGP
+    update-source loopback used for BGP-over-SVR sessions. To identify the
+    IP and context: check updateSource in get_bgp_neighbors output, and look
+    for auto-generated services named _bgp_<routerId>_<interfaceName> in
+    get_services — the service prefix field gives the loopback's IP.
 
     Args:
         router:      Router name (required).
-        vrf:         (optional) Filter by VRF name.
-        ip:          (optional) Host address or prefix for LPM lookup,
-                     e.g. '192.168.1.50' or '10.0.0.0/8'.
-        filter:      (optional) Additional filter string.
-        sub_command: (optional) RibSubCommand enum value.
-        limit:       Max entries to return. Omit to return all entries.
+        summarize:   Return a route-count summary when True (default).
+                     Set False to retrieve raw entries.
+        vrf:         (optional) Filter by VRF name (all modes).
+        ip:          (optional) Prefix or host address for lookup/LPM.
+                     Overrides summarize.
+        next_hop:    (optional) "*" for next-hop overview; a specific
+                     next-hop value to filter to. Overrides summarize.
+        filter:      (optional) Protocol filter string (raw mode only).
+        sub_command: (optional) RibSubCommand value (raw mode only).
+        limit:       (optional) Max raw entries to return (raw mode only).
     """
-    entries = await get_client().get_rib(router, vrf, ip, filter, sub_command, limit)
+    client = get_client()
+
+    if ip is not None:
+        entries = await client.get_rib(router, vrf=vrf, ip=ip)
+        giid_to_name, _ = await _build_iface_map(router)
+        entries = _resolve_entries_ifaces(entries, giid_to_name)
+        return json.dumps({"prefix": ip, "count": len(entries), "routes": entries}, indent=2)
+
+    if next_hop == "*":
+        giid_to_name, _ = await _build_iface_map(router)
+        entries = await client.get_rib(router, vrf=vrf)
+        entries = _resolve_entries_ifaces(entries, giid_to_name)
+        groups: dict[str, dict] = {}
+        for e in entries:
+            seen: set[str] = set()
+            for nh in (e.get("nextHops") or []):
+                if nh.get("blackhole"):
+                    key, nh_type = "blackhole", "blackhole"
+                elif nh.get("ip"):
+                    key, nh_type = nh["ip"], "ip"
+                elif nh.get("interfaceName"):
+                    key, nh_type = nh["interfaceName"], "interface"
+                else:
+                    continue
+                if key not in seen:
+                    seen.add(key)
+                    if key not in groups:
+                        groups[key] = {"next_hop": key, "type": nh_type, "count": 0, "prefixes": set()}
+                    groups[key]["count"] += 1
+                    if e.get("prefix"):
+                        groups[key]["prefixes"].add(e["prefix"])
+        result = sorted(groups.values(), key=lambda x: x["count"], reverse=True)
+        for g in result:
+            g["prefixes"] = sorted(g["prefixes"])
+        return json.dumps({"next_hops": result}, indent=2)
+
+    if next_hop is not None:
+        giid_to_name, name_to_giid = await _build_iface_map(router)
+        # Accept either the friendly name ("ge-0-1") or raw giid ("g10") as input
+        client_next_hop = name_to_giid.get(next_hop, next_hop)
+        entries = await client.get_rib(router, vrf=vrf, next_hop=client_next_hop)
+        entries = _resolve_entries_ifaces(entries, giid_to_name)
+        resolved_nh = _resolve_iface_name(client_next_hop, giid_to_name)
+        if resolved_nh.lower() == "blackhole":
+            nh_type = "blackhole"
+        elif re.match(r"^\d{1,3}(\.\d{1,3}){3}$", resolved_nh) or ":" in resolved_nh:
+            nh_type = "ip"
+        else:
+            nh_type = "interface"
+        prefixes = sorted({e["prefix"] for e in entries if e.get("prefix")})
+        return json.dumps(
+            {"next_hop": resolved_nh, "type": nh_type, "count": len(entries), "prefixes": prefixes},
+            indent=2,
+        )
+
+    if summarize:
+        raw = await client.get_rib_summary(router)
+        parsed = _parse_rib_summary(raw.get("data", ""))
+        if vrf:
+            parsed = {vrf: parsed[vrf]} if vrf in parsed else {}
+        return json.dumps({"vrfs": parsed}, indent=2)
+
+    entries = await client.get_rib(router, vrf=vrf, filter=filter, sub_command=sub_command, limit=limit)
+    giid_to_name, _ = await _build_iface_map(router)
+    entries = _resolve_entries_ifaces(entries, giid_to_name)
     return json.dumps({"count": len(entries), "rib": entries}, indent=2)
 
 

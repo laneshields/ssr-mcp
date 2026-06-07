@@ -409,6 +409,8 @@ class SSRClient:
         limit: int | None = None,
         vrf: str | None = None,
         ip_prefix: str | None = None,
+        tenant: str | None = None,
+        service: str | None = None,
     ) -> list:
         page_size = 1000
         cursor: str | None = None
@@ -447,6 +449,11 @@ class SSRClient:
 
             if not cursor:
                 break
+
+        if tenant:
+            entries = [e for e in entries if e.get("tenant") == tenant]
+        if service:
+            entries = [e for e in entries if e.get("service") == service]
 
         return entries
 
@@ -1096,6 +1103,12 @@ class SSRClient:
             {"routerName": router, "nodeName": node, "first": limit, "orderBy": order_by},
         )
 
+    async def get_rib_summary(self, router: str) -> dict:
+        """Fetch the 'show rib vrf all summary' output as a raw dict."""
+        return await self._get(
+            f"/api/v1/router/{router}/routingEngine/showCommand/show%20rib%20vrf%20all%20summary"
+        )
+
     _RIB_QUERY = """
     query GetRib(
       $routerName: String!
@@ -1160,6 +1173,7 @@ class SSRClient:
         filter: str | None = None,
         sub_command: str | None = None,
         limit: int | None = None,
+        next_hop: str | None = None,
     ) -> list:
         page_size = 1000
         cursor: str | None = None
@@ -1197,6 +1211,21 @@ class SSRClient:
 
             if not cursor:
                 break
+
+        if next_hop is not None:
+            nh_lower = next_hop.lower()
+
+            def _nh_matches(entry: dict) -> bool:
+                for nh in entry.get("nextHops") or []:
+                    if nh_lower == "blackhole" and nh.get("blackhole"):
+                        return True
+                    if nh.get("ip") == next_hop:
+                        return True
+                    if nh.get("interfaceName") == next_hop:
+                        return True
+                return False
+
+            entries = [e for e in entries if _nh_matches(e)]
 
         return entries
 

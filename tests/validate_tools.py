@@ -366,13 +366,80 @@ async def test_get_arp(c: SSRClient, ctx: TestContext):
 
 @register()
 async def test_get_rib(c: SSRClient, ctx: TestContext):
-    r = await c.get_rib(ctx.router, ctx.node)
-    assert isinstance(r, (list, dict))
+    # Summary mode via showCommand
+    raw = await c.get_rib_summary(ctx.router)
+    assert isinstance(raw, dict) and "data" in raw, "get_rib_summary did not return expected shape"
+
+    from ssr_mcp.server import _parse_rib_summary
+    parsed = _parse_rib_summary(raw["data"])
+    assert parsed, "RIB summary parsed to empty result"
+    assert any("ipv4" in af_data for af_data in parsed.values()), "no ipv4 AF in parsed summary"
+
+    # Prefix lookup
+    entries = await c.get_rib(ctx.router, ip="0.0.0.0/0")
+    assert isinstance(entries, list) and len(entries) > 0, "prefix lookup returned no results"
+    assert all(e.get("prefix") == "0.0.0.0/0" for e in entries), "prefix lookup returned wrong prefix"
+
+    # Next-hop analysis: find a non-blackhole interfaceName from the full RIB
+    all_entries = await c.get_rib(ctx.router)
+    iface_names = [
+        nh["interfaceName"]
+        for e in all_entries
+        for nh in (e.get("nextHops") or [])
+        if nh.get("interfaceName") and not nh.get("blackhole")
+    ]
+    if iface_names:
+        target_iface = iface_names[0]
+        filtered = await c.get_rib(ctx.router, next_hop=target_iface)
+        assert all(
+            any(nh.get("interfaceName") == target_iface for nh in (e.get("nextHops") or []))
+            for e in filtered
+        ), "next_hop interface filter returned entries that don't use that interface"
+
+    # Blackhole filter
+    blackhole_entries = await c.get_rib(ctx.router, next_hop="blackhole")
+    assert all(
+        any(nh.get("blackhole") for nh in (e.get("nextHops") or []))
+        for e in blackhole_entries
+    ), "blackhole filter returned entries without blackhole next-hop"
+
+    # Next-hop overview (next_hop="*")
+    from ssr_mcp.server import get_rib as server_get_rib
+    import json as _json
+    overview_json = await server_get_rib(router=ctx.router, next_hop="*")
+    overview = _json.loads(overview_json)
+    assert "next_hops" in overview, "next_hop='*' did not return next_hops key"
+    nh_types = {g["type"] for g in overview["next_hops"]}
+    assert nh_types, "next-hop overview returned no groups"
+    # Counts should be positive and prefixes non-empty
+    for g in overview["next_hops"]:
+        assert g["count"] > 0
+        assert isinstance(g["prefixes"], list) and len(g["prefixes"]) > 0
+        assert g["type"] in ("blackhole", "ip", "interface")
 
 @register()
 async def test_get_fib(c: SSRClient, ctx: TestContext):
+    # Default call: no args — client returns all entries for summary aggregation
     r = await c.get_fib(ctx.router, ctx.node)
-    assert isinstance(r, (list, dict))
+    assert isinstance(r, list)
+
+    # Filtered by service: pick the most common service from the full result
+    services = [e.get("service") for e in r if e.get("service")]
+    if services:
+        top_service = max(set(services), key=services.count)
+        filtered = await c.get_fib(ctx.router, ctx.node, service=top_service)
+        assert all(e.get("service") == top_service for e in filtered), (
+            f"service filter returned entries with unexpected service values"
+        )
+
+    # Filtered by tenant: same pattern
+    tenants = [e.get("tenant") for e in r if e.get("tenant")]
+    if tenants:
+        top_tenant = max(set(tenants), key=tenants.count)
+        filtered = await c.get_fib(ctx.router, ctx.node, tenant=top_tenant)
+        assert all(e.get("tenant") == top_tenant for e in filtered), (
+            f"tenant filter returned entries with unexpected tenant values"
+        )
 
 @register()
 async def test_fib_lookup(c: SSRClient, ctx: TestContext):
