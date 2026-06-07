@@ -5,7 +5,7 @@ import json
 import os
 import pathlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -958,28 +958,6 @@ async def get_device_interfaces(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
-async def get_network_interface_applications(
-    router: str | None = None,
-    node: str | None = None,
-    network_interface: str | None = None,
-) -> str:
-    """Get raw application plugin state for network interfaces. Returns the
-    full plugin state blob including Kea DHCP service status, metrics, and
-    lease data.
-
-    Prefer get_dhcp_leases for questions about clients or leases — it returns
-    the same data in a clean, flat structure with all metrics noise removed.
-    Use this tool only when you need the raw Kea service status or metrics.
-
-    Args:
-        router:            (optional) Limit to a specific router.
-        node:              (optional) Limit to a specific node.
-        network_interface: (optional) Limit to a specific interface by name.
-    """
-    data = await get_client().get_network_interface_applications(router, node, network_interface)
-    return json.dumps(data, indent=2)
-
 
 def _parse_node_utilization(data: dict) -> list[dict]:
     result = []
@@ -1068,6 +1046,92 @@ def _extract_dhcp_leases(data: dict) -> list[dict]:
                             "leases": leases,
                         })
     return leases_by_interface
+
+
+def _extract_dhcp_servers(data: dict) -> list[dict]:
+    result = []
+    for router_node in data.get("data", {}).get("allRouters", {}).get("nodes", []):
+        for node in router_node.get("nodes", {}).get("nodes", []):
+            for dev_iface in node.get("deviceInterfaces", {}).get("nodes", []):
+                for net_iface in (dev_iface.get("networkInterfaces") or {}).get("nodes") or []:
+                    if (net_iface.get("name") or "").startswith("dhcp-server-gen-"):
+                        continue
+                    plugin_state = (net_iface.get("plugins") or {}).get("state") or {}
+                    dhcp_server = plugin_state.get("dhcp-server")
+                    if not dhcp_server:
+                        continue
+
+                    statuses = {}
+                    for item in dhcp_server:
+                        for key in ("kea-service-target-status", "kea-status", "kea-ctrl-status"):
+                            if key in item:
+                                vals = item[key]
+                                statuses[key] = vals[0] if isinstance(vals, list) and vals else vals
+
+                    ha = next(
+                        (item["ha-heartbeat"] for item in dhcp_server if "ha-heartbeat" in item),
+                        None,
+                    )
+
+                    metrics_raw = next(
+                        (item["metrics"] for item in dhcp_server if "metrics" in item),
+                        [],
+                    )
+                    metrics = {k: v for m in metrics_raw for k, v in m.items()}
+
+                    subnets_raw = next(
+                        (item["subnets"] for item in dhcp_server if "subnets" in item),
+                        [],
+                    )
+                    subnets = []
+                    for idx, subnet_wrapper in enumerate(subnets_raw, start=1):
+                        subnet_data = subnet_wrapper.get("subnet", {})
+                        assigned = metrics.get(f"subnet[{idx}].assigned-addresses", subnet_data.get("current-lease-count"))
+                        total = metrics.get(f"subnet[{idx}].total-addresses")
+                        utilization_pct = round(assigned / total * 100, 1) if total and assigned is not None else None
+                        subnets.append({
+                            "subnet": subnet_data.get("subnet"),
+                            "assigned_addresses": assigned,
+                            "total_addresses": total,
+                            "utilization_pct": utilization_pct,
+                        })
+
+                    entry: dict = {
+                        "interface": net_iface.get("name"),
+                        "kea_service_target_status": statuses.get("kea-service-target-status"),
+                        "kea_status": statuses.get("kea-status"),
+                        "kea_ctrl_status": statuses.get("kea-ctrl-status"),
+                        "subnets": subnets,
+                    }
+                    if ha:
+                        entry["ha_role"] = ha.get("role")
+                        entry["ha_state"] = ha.get("state")
+                    result.append(entry)
+    return result
+
+
+@mcp.tool()
+async def get_dhcp_servers(
+    router: str | None = None,
+    node: str | None = None,
+    network_interface: str | None = None,
+) -> str:
+    """Get DHCP server health summary for interfaces configured as DHCP servers.
+
+    Returns per-interface Kea service status, per-subnet address pool utilization
+    (assigned vs total addresses), and HA role/state when HA is configured.
+
+    Use this to answer "is my DHCP server running?" or "is this subnet running
+    out of addresses?". For individual lease records use get_dhcp_leases instead.
+
+    Args:
+        router:            (optional) Limit to a specific router.
+        node:              (optional) Limit to a specific node.
+        network_interface: (optional) Limit to a specific interface by name.
+    """
+    data = await get_client().get_network_interface_applications(router, node, network_interface)
+    servers = _extract_dhcp_servers(data)
+    return json.dumps({"dhcp_server_count": len(servers), "interfaces": servers}, indent=2)
 
 
 @mcp.tool()
@@ -1490,9 +1554,12 @@ async def list_service_paths(
 
 @mcp.tool()
 async def get_software_version() -> str:
-    """Get the software version of the device SSR_HOST points to — either
-    the conductor or the standalone router. Does not accept a router argument;
-    to check a specific managed router's version use get_system_state instead.
+    """Get detailed software version information for the connected device,
+    including build metadata beyond what get_connection_info provides.
+
+    Call this when you need more version detail than the version string in
+    get_connection_info. For managed routers, use get_router_info which returns
+    per-node software versions.
 
     Context: any — always returns the version of the connected device.
     """
@@ -1612,18 +1679,20 @@ async def get_events(
 ) -> str:
     """Get the event (audit log) history for a router.
 
-    WARNING: Without a from_time filter this queries from the beginning of
-    time and may return enormous amounts of data. Always use from_time to
-    bound the query to a relevant time window.
+    Defaults to the last 24 hours when from_time is not provided. Pass
+    from_time explicitly to extend or narrow the window.
 
     Args:
         router:      Router name (required).
         from_time:   Start of time range in ISO 8601, e.g. '2026-05-01T00:00:00Z'.
+                     Defaults to 24 hours ago.
         to_time:     End of time range in ISO 8601. Defaults to now.
         event_types: (optional) List of AuditLogType values to filter by.
         subtype:     (optional) Event subtype to filter by.
         limit:       Max events to return. Omit to return all events in range.
     """
+    if from_time is None:
+        from_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     events = await get_client().get_events(router, from_time, to_time, event_types, subtype, limit)
     return json.dumps({"count": len(events), "events": events}, indent=2)
 
@@ -1650,8 +1719,12 @@ async def get_system_processes(
     router: str | None = None,
     node: str | None = None,
 ) -> str:
-    """Get the status of all major SSR processes on a node, including whether
-    HA-capable processes are active or standby (leaderStatus).
+    """Get the status of all major SSR processes on a node.
+
+    Call this when get_system_state or get_router_health indicates a node is
+    not fully RUNNING — it identifies which specific processes are down. Also
+    use this to check HA leader/standby status for redundancy-capable processes
+    (e.g. to confirm which node is active after a failover).
 
     Context: any — omit router to query the connected device itself.
 
@@ -1783,6 +1856,10 @@ async def get_system_services(
 ) -> str:
     """Get the status of systemd services used alongside the SSR application.
 
+    Use this only to check OS-level service status (e.g. authy, salt-minion,
+    or other systemd services). For SSR process health, get_router_health
+    includes SSR process state and get_system_processes gives per-process detail.
+
     Context: any — omit router to query the connected device itself.
 
     Args:
@@ -1801,6 +1878,11 @@ async def get_system_connectivity(
     """Get management connectivity status between nodes and the conductor,
     or between nodes in an HA router pair.
 
+    Use this only to diagnose management plane or HA node-to-node connectivity
+    issues specifically. get_router_health's overall_status already covers node
+    online/offline state — call this only when you need to understand which
+    specific connectivity links are degraded.
+
     Context: any — omit router to query the connected device itself.
 
     Args:
@@ -1818,6 +1900,11 @@ async def get_system_state(
 ) -> str:
     """Get basic system state for routers/nodes — status, uptime, role,
     software version, and active alarm count.
+
+    Call this for a quick node status check. If any node returns a status other
+    than RUNNING, follow up with get_system_processes to identify which specific
+    processes are not in their expected state. For a full health summary
+    including alarms and utilization, use get_router_health instead.
 
     Context: any — omit router to query the connected device itself.
              On a conductor, omitting router returns state for all managed
@@ -1888,26 +1975,29 @@ async def list_tenant_members(
     return json.dumps({"count": len(entries), "tenant_members": entries}, indent=2)
 
 
+_SERVICE_DETAIL_FIELDS = frozenset({"access", "transport", "serviceRoutes"})
+
+
 @mcp.tool()
 async def list_services(
     router: str,
     node: str | None = None,
     filter: str | None = None,
+    detail: bool = False,
 ) -> str:
-    """List configured services with live traffic metrics (session count,
-    bandwidth in/out) and service configuration (prefixes, transport, policy,
-    service routes, access lists).
+    """List configured services with path status and service configuration.
 
-    Use this as the first stop for any bandwidth or traffic volume question.
-    Every session on the router matches a service, so this gives a complete
-    picture of what is carrying traffic without requiring app-id. It will not
-    break out individual applications within a broad service like 'internet' —
-    use get_application_series for that (requires app-id with http/https mode).
-
-    Also use this as the first step when the destination is described by name
+    Use this as the first step when the destination is described by name
     rather than IP (e.g. "the internet", "corporate VPN", "the file server").
     Find the most likely matching service name, then pass it to
     list_service_paths to check whether that service's paths are up.
+
+    By default (detail=False) returns a compact summary per service:
+    name, enabled state, type, route type, service policy, prefixes, and
+    up/down path counts. Use detail=True only when you need to inspect
+    tenant access lists (allowed/denied), port/protocol transport rules,
+    or individual service route names — these fields are large and rarely
+    needed for initial triage.
 
     Args:
         router: Router name (required).
@@ -1917,8 +2007,21 @@ async def list_services(
                 Examples:
                   '"service_name"="internet"'   - exact match
                   '"service_name"~"lane"'        - contains
+        detail: When True, include access lists, transport rules, and service
+                route detail. Default False.
     """
     data = await get_client().get_services(router, node, filter)
+
+    if detail:
+        return json.dumps(data, indent=2)
+
+    # Strip large config-only fields from each service entry
+    for router_node in data.get("data", {}).get("allRouters", {}).get("nodes", []):
+        for node_entry in router_node.get("nodes", {}).get("nodes", []):
+            node_entry["serviceInfo"] = [
+                {k: v for k, v in svc.items() if k not in _SERVICE_DETAIL_FIELDS}
+                for svc in node_entry.get("serviceInfo", [])
+            ]
     return json.dumps(data, indent=2)
 
 
@@ -2364,6 +2467,7 @@ async def get_application_series(
     window_minutes: int = 30,
     application: str | None = None,
     summarize: bool = True,
+    top_n: int | None = None,
 ) -> str:
     """Get full per-application traffic data including client IPs, tenants, and
     path detail for a router node.
@@ -2423,6 +2527,9 @@ async def get_application_series(
         summarize:      When True (default), collapse all time buckets into a
                         per-application summary sorted by total bytes.
                         When False, return the raw time-bucketed series.
+        top_n:          When set and summarize=True, return only the top N
+                        applications by total bytes. total_applications in the
+                        response shows the full count before truncation.
     """
     buckets = await get_client().get_application_series(router, node, window_minutes)
 
@@ -2436,11 +2543,15 @@ async def get_application_series(
         return json.dumps({"bucket_count": len(buckets), "series": buckets}, indent=2)
 
     summary = _summarize_app_series(buckets, application)
+    total_applications = len(summary)
+    if top_n is not None:
+        summary = summary[:top_n]
     return json.dumps(
         {
             "window_minutes": window_minutes,
             "bucket_count": len(buckets),
             "application_count": len(summary),
+            "total_applications": total_applications,
             "applications": summary,
         },
         indent=2,
@@ -2505,6 +2616,7 @@ async def get_application_tcp_health(
     node: str,
     window_minutes: int = 30,
     min_sessions: int = 5,
+    top_n: int = 20,
 ) -> str:
     """Get TCP health metrics for active applications, sorted by worst retransmission rate.
 
@@ -2534,6 +2646,8 @@ async def get_application_tcp_health(
         node:           Node name (required).
         window_minutes: Time window to query. Default 30 minutes.
         min_sessions:   Minimum new+active sessions to include an application. Default 5.
+        top_n:          Max applications to return, worst-first. Default 20.
+                        total_applications in the response shows the full count.
     """
     buckets = await get_client().get_application_series(router, node, window_minutes)
     summary = _summarize_app_series(buckets)
@@ -2550,11 +2664,14 @@ async def get_application_tcp_health(
         return (app["tcp_retrans_from_server"] + app["tcp_retrans_from_client"]) / total_pkts
 
     active.sort(key=retrans_rate, reverse=True)
+    total_applications = len(active)
+    active = active[:top_n]
 
     return json.dumps(
         {
             "window_minutes": window_minutes,
             "application_count": len(active),
+            "total_applications": total_applications,
             "applications": [
                 {
                     "name": app["name"],
@@ -2978,6 +3095,11 @@ async def get_bgp_neighbors(
     neighbor: str | None = None,
 ) -> str:
     """Get detailed BGP neighbor information — equivalent to 'show bgp neighbors'.
+
+    Call get_bgp_summary first — it shows neighbor states across all address
+    families in a compact view. Call this tool only when you need per-neighbor
+    detail: capabilities, reset reason, RTT, route-map info, or to distinguish
+    SVR vs IP transport neighbors.
 
     Returns per-neighbor detail including BGP state, uptime, message stats,
     capabilities, address family info (accepted/sent prefix counts, route-maps),
