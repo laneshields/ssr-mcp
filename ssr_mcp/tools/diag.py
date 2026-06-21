@@ -55,29 +55,15 @@ async def get_dropped_packets(
     raw: bool = False,
 ) -> str:
     """Sample the dropped-packets stream for a node — packets that hit the
-    service area but could not establish a session. Each drop consumes CPU
-    regardless of outcome, so identifying and fixing drop patterns frees
-    service area capacity for legitimate traffic.
+    service area but could not establish a session. Each drop consumes CPU, so
+    drop patterns explain both broken connectivity and unexplained high service
+    area CPU (a flood of unmatched packets, a misconfigured client, a scan).
 
-    Use this in two situations:
-      1. Connectivity broken, no specific flow details — unfiltered, it shows
-         what traffic is failing and why across the whole node, which is often
-         enough to identify the root cause without knowing the source or
-         destination in advance.
-      2. Service area CPU is unexpectedly high — drops consume service area
-         CPU even when no user is aware of the failing traffic (e.g. a flood
-         of unmatched packets, a misconfigured client, or a port scan). Use
-         this alongside get_node_utilization or get_session_processor_utilization
-         to investigate elevated CPU with no obvious active-session explanation.
-
-    When you do have specific flow details, use filters to narrow the stream
-    to that traffic, or use fib_lookup instead for a definitive answer on
-    what the dataplane would do with a specific packet.
-
-    Returns a pattern summary: drops by reason, by ingress interface, top
-    source IPs, top destination IP:port pairs, and protocol breakdown. This
-    is usually enough to identify the root cause and the configuration change
-    needed to resolve it.
+    Returns a pattern summary: drops by reason, by ingress interface, top source
+    IPs, top destination IP:port pairs, and protocol breakdown. With specific
+    flow details, narrow with filters, or use fib_lookup for a definitive answer
+    on what the dataplane would do. The begin_query guidance covers when drops do
+    and do not appear (FIB misses do not).
 
     Common drop reasons:
       ACCESS          — no matching service or tenant access denied
@@ -242,38 +228,12 @@ async def query_stats(
 @mcp.tool(annotations=_RO)
 async def get_fragmentation_stats(router: str, window_minutes: int = 30) -> str:
     """Get IP fragmentation and reassembly activity for a router over a time window.
+    Use when investigating MTU/MSS-related slowness or packet loss. Reports the
+    delta (total_change) per counter over the window, plus current/avg/max rate
+    and trend; total_change = 0 means no events in that period.
 
-    Reports the delta (total_change) for each counter over the window — not the
-    cumulative all-time total. total_change = 0 means no events in that period
-    regardless of historical totals. Each counter also includes current_rate,
-    avg_rate, max_rate (events/second), and trend.
-
-    Use when investigating MTU/MSS-related slowness or packet loss. Three scenarios:
-
-    1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop.total_change > 0):
-       DF-set packets arrived that exceeded the SSR's egress interface MTU. The SSR
-       dropped them and sent ICMP Fragmentation Needed. Always a misconfiguration —
-       lower the interface MTU config or the upstream sender's MSS.
-
-    2. SSR is fragmenting non-DF traffic (sent.ipv4_packets_fragmented.total_change > 0,
-       ipv4_dont_fragment_drop.total_change = 0):
-       The SSR is fragmenting packets without DF set — typically UDP from LAN hosts
-       whose MTU exceeds the WAN interface MTU (e.g. LAN=1500, WAN=1492). Sub-optimal
-       but expected; TCP is protected by enforcedMss, UDP has no MSS negotiation.
-
-    3. Downstream MTU mismatch (all total_change = 0, but ping DF search fails):
-       The SSR's configured MTU is optimistic — a downstream hop silently drops
-       oversized packets. These counters do NOT fire for this case. Use ping with
-       dont_frag=True + binary search on packet size to detect and confirm.
-
-    Key counters (each reports total_change, current_rate, avg_rate, max_rate, trend):
-      sent.ipv4_dont_fragment_drop        — SSR dropped DF-set packet (always a problem)
-      sent.ipv4_packets_fragmented        — SSR fragmented a non-DF packet (may be expected)
-      sent.ipv4_non_fabric_fragments      — fragments on standard IP-routed paths
-      sent.ipv4_fabric_fragments          — fragments on SVR paths
-      received.successfully_reassembled   — fragmented traffic arriving at SSR
-      received.fragment_chains_timeout    — reassembly timed out (~15s); lost fragments
-      received.failure_to_reassemble      — fragments collected but reassembly failed
+    For the counter list and the three MTU/MSS scenarios these counters
+    distinguish, call get_guidance(topic="fragmentation").
 
     Args:
         router:         Router name (required).
@@ -302,19 +262,15 @@ async def query_metrics(
     Two modes depending on the metric type:
 
     Gauge metrics (counter=False, default): values that go up and down —
-    CPU%, session count, bandwidth. Summary reports current/min/max/average
-    of the raw values. Use avg to distinguish sustained load from transient
-    spikes: if current >> avg the reading is a spike; if current ≈ avg and
-    both are high the load is sustained and worth acting on.
+    CPU%, session count, bandwidth. Summary reports current/min/max/average.
 
     Counter metrics (counter=True): values that only ever increase — bytes
     transmitted, packets dropped, TCP retransmissions, fragmentation events.
-    Summary reports the rate of change between samples (current rate, avg
-    rate, max rate, total change over the window). Use total_change to
-    determine whether the condition is active: zero means no events in the
-    window regardless of the all-time total; non-zero means it is happening
-    now. Counter resets (e.g. after a reboot) are treated as zero rather
-    than negative spikes.
+    Summary reports rates (current/avg/max) and total_change over the window;
+    counter resets (e.g. after a reboot) are treated as zero, not negative.
+
+    The begin_query guidance covers how to read avg vs current for gauges and
+    total_change for counters before treating a value as a confirmed problem.
 
     Known metric IDs:
       /stats/aggregate-session/node/session-count  — gauge  (unit: 'count')
@@ -515,22 +471,8 @@ async def get_security_events(
 
     summarize=True (default) groups events by attack type and returns counts,
     unique source/dest IPs, severity, and action — useful for a quick overview.
-    summarize=False returns one cleaned record per event with these fields:
-      timestamp       — UTC time of detection
-      attack          — signature or anomaly name
-      cve_id          — associated CVE if known
-      threat_severity — CRITICAL / HIGH / MEDIUM / LOW / INFO
-      action          — CLOSE (session torn down) / DROP / ALERT
-      is_alert        — true = logged only; false = actively blocked
-      msg_type        — SIG (signature match) or ANOMALY (protocol anomaly)
-      src_addr / src_port / src_interface — attack source
-      dest_addr / dest_port / dest_interface — targeted host
-      protocol        — TCP / UDP / ICMP
-      tenant_name     — SSR tenant the traffic belongs to
-      service_name    — SSR service matched
-      session_id      — SSR session identifier
-      repeat_count    — number of times this attack repeated in the session
-      url             — URL targeted (populated for some HTTP attacks)
+    summarize=False returns one cleaned record per event. For the per-event
+    field reference, call get_guidance(topic="security_events").
 
     Context: router
 

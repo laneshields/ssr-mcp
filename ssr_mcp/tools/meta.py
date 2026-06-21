@@ -2,7 +2,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from ssr_mcp.core import mcp, _RO, _LW, _GUIDANCE, _LOG_PATH
+from ssr_mcp.core import mcp, _RO, _LW, _GUIDANCE, _TOPICS, _LOG_PATH
 
 
 _TRIAGE_CATEGORIES: dict[str, dict] = {
@@ -213,15 +213,24 @@ async def begin_query(question: str) -> str:
 
 
 @mcp.tool(annotations=_RO)
-async def get_guidance() -> str:
+async def get_guidance(topic: str | None = None) -> str:
     """Return operational guidance for using this MCP server effectively.
 
-    Also returned automatically by `begin_query` — call this only if you need
-    to re-read the guidance mid-session without logging a new query.
+    With no topic, returns the same general guidance `begin_query` returns.
+    Call this only to re-read it mid-session without logging a new query.
 
-    No arguments required.
+    With a topic, returns a deep tool-specific reference. Some tool docstrings
+    point here for detail kept out of their always-loaded description.
+
+    Args:
+        topic: (optional) A reference topic. Known topics: 'rib'. An unknown
+               topic returns the list of available topics.
     """
-    return _GUIDANCE
+    if topic is None:
+        return _GUIDANCE
+    if topic in _TOPICS:
+        return _TOPICS[topic]
+    return f"Unknown topic '{topic}'. Available topics: {', '.join(sorted(_TOPICS))}."
 
 
 @mcp.tool(annotations=_LW)

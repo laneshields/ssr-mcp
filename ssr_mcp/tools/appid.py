@@ -528,14 +528,8 @@ async def get_application_traffic(
       application — case-insensitive substring match on application name.
       client_ip   — substring match on client IP address.
 
-    TCP health interpretation (tcp_health and clients views):
-      tcp_retrans_from_server_pct high → WAN downlink loss (server→client direction)
-      tcp_retrans_from_client_pct high → LAN or uplink loss (client→server direction)
-      ssr_retrans_to_* non-zero        → SSR is the bottleneck (rare)
-      avg_fwd_rtt_ms high              → WAN latency to server
-      avg_rev_rtt_ms high              → reverse-path latency
-      avg_tcp_connection_ms            → mean time-to-first-data-packet (TCP + TLS); biased
-                                         toward surviving connections under high-loss conditions.
+    TCP health signal interpretation (tcp_retrans_*, rtt, ttfp) is in the
+    begin_query slow-traffic guidance.
 
     services: SSR service name(s) handling this application or client — use with
     list_service_paths to check path health and SVR vs. IP forwarding.

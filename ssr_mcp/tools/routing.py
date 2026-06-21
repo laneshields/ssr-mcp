@@ -226,55 +226,20 @@ async def get_rib(
 ) -> str:
     """Get routes from the Routing Information Base (RIB) for a router.
 
-    Operates in five modes depending on which parameters are provided:
+    Five modes by parameter:
+      - default (summarize=True): route counts by protocol per VRF, all address
+        families. One fast call, safe on large BGP tables.
+      - ip set: all RIB entries for a prefix, or longest-prefix match for a host
+        address. Overrides summarize.
+      - next_hop="*": enumerate unique next-hops (interfaces, gateways,
+        blackhole) with prefix count and list each, sorted by count descending.
+      - next_hop=<value>: prefixes routing via "blackhole", an IP gateway, or an
+        interface name (friendly or raw giid, e.g. "ge-0-1" or "g10").
+      - summarize=False: raw entries with vrf/filter/sub_command/limit controls.
 
-    1. Summary (default, summarize=True, no ip/next_hop): returns route counts
-       by protocol per VRF for all address families. One fast API call —
-       safe to use even on routers with large BGP tables.
-
-    2. Prefix lookup (ip provided): returns all RIB entries for a specific
-       prefix or the longest-prefix match for a host address. Use this to
-       determine which protocol(s) have a route to a destination and what
-       next-hops each uses.
-
-    3. Next-hop overview (next_hop="*"): enumerates all unique next-hops —
-       interface names, IP gateways, and blackhole — with the count and list
-       of prefixes using each. Sorted by route count descending. Use this to
-       identify which next-hops carry the most routes and evaluate whether
-       route summarization could reduce the table size. A prefix appears under
-       every distinct next-hop value in its nextHops array (e.g. a recursive
-       BGP route with both a peer IP and a resolved interface will appear
-       under both).
-
-    4. Next-hop filter (next_hop=<value>): returns all prefixes that route
-       via a specific next-hop. Accepts:
-         - "blackhole"     — entries with a blackhole next-hop
-         - an IP address   — entries with that IP as a gateway
-         - an interface name (friendly name or raw giid) — entries via that
-           interface; both forms are accepted, e.g. "ge-0-1" or "g10"
-
-    5. Raw listing (summarize=False, no ip/next_hop): returns raw RIB entries
-       with optional vrf/filter/sub_command/limit controls.
-
-    Interface name resolution (modes 2–5):
-    All nextHops[].interfaceName values are automatically resolved from their
-    raw giid form (e.g. "g11") to the human-readable network interface name
-    (e.g. "ge-0-2"). Two special interfaces have fixed giid values and are
-    resolved without an API call:
-      - kni254 (g4294967294): IPv4 KNI — bridges Linux OS networking to the
-        SSR forwarding plane; present on all SSR versions.
-      - kni253 (g4294967293): IPv6 KNI — same purpose for IPv6; introduced
-        in SSR 7.0.
-    Giids with no matching network interface (e.g. VRF-internal or waypoint
-    interfaces) are left as-is.
-
-    Routing-engine interface names (e.g. "lo0") are not giids and are not
-    resolvable via get_network_interfaces. They are loopback or other
-    interfaces owned by the FRR routing process — most commonly the BGP
-    update-source loopback used for BGP-over-SVR sessions. To identify the
-    IP and context: check updateSource in get_bgp_neighbors output, and look
-    for auto-generated services named _bgp_<routerId>_<interfaceName> in
-    get_services — the service prefix field gives the loopback's IP.
+    nextHops[].interfaceName values are auto-resolved from raw giid to the
+    friendly name. For giid/KNI resolution and routing-engine interfaces (lo0,
+    BGP-over-SVR loopbacks), call get_guidance(topic="rib").
 
     Args:
         router:      Router name (required).

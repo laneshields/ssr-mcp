@@ -194,32 +194,11 @@ async def get_network_interfaces(
     """Get network interface (VLAN) configuration and state, including
     configured and DHCP-resolved IP addresses, gateway, prefix length,
     the operational status of the underlying device interface, the configured
-    mtu, and enforcedMss.
+    mtu, and enforcedMss. Each interface carries a globalId (giid) used to
+    resolve RIB next-hop interfaceName values ('gX') to interface names.
 
-    MTU/MSS notes:
-    - mtu: the configured MTU on this interface. For IP-routed (non-SVR)
-      traffic, enforcedMss=automatic clamps TCP MSS based on this value.
-    - enforcedMss: automatic = SSR clamps TCP MSS; disabled = no clamping.
-    - For SVR traffic, MSS clamping uses the path-discovered MTU from
-      list_peer_paths, not this configured value.
-    - Even when SVR paths show a valid discovered MTU and enforcedMss is
-      automatic, verify this configured mtu matches the physical network
-      — it governs MSS for all non-SVR traffic through the interface.
-
-    Each interface includes a globalId field — this is the internal global
-    interface ID (giid) used by the routing stack. RIB next-hop entries
-    reference interfaces by giid in the format 'gX' (e.g. 'g12'). Match the
-    number X against globalId to resolve a giid to a network interface name.
-
-    To resolve a source IP to a network interface name for fib_lookup:
-      1. Check whether the source IP falls within the subnet of any interface
-         whose deviceInterface.type is 'ethernet' (forwarding interfaces).
-         If it matches, that interface name is the source_interface. Ignore
-         host-type device interfaces — these are internal SSR interfaces.
-      2. If no subnet matches (off-network source), call get_rib with the
-         source IP to get the LPM next-hop, extract the giid from
-         interfaceName (e.g. 'g12'), then match against globalId here to
-         get the interface name.
+    For MTU/MSS interpretation and the giid / source-IP resolution procedures,
+    call get_guidance(topic="network_interfaces").
 
     Args:
         router:            (optional) Limit to a specific router.

@@ -115,11 +115,9 @@ async def get_tenant_membership(
     vlan: int | None = None,
     source_ip: str | None = None,
 ) -> str:
-    """Show tenant membership rules for a node and look up how traffic is classified.
-
-    Tenant classification is step 1 of SSR traffic processing: the source IP
-    and ingress interface are matched against membership rules to assign a tenant,
-    which is then used for FIB lookup.
+    """Show tenant membership rules for a node and look up how traffic is
+    classified — step 1 of SSR traffic processing (see the begin_query guidance
+    traffic-flow section).
 
     **Modes:**
 

@@ -191,6 +191,114 @@ to confirm whether it is sustained or historical before treating it as a
 confirmed problem.
 """
 
+# Deep, tool-specific reference fetched on demand via get_guidance(topic=...).
+# Lore lives here instead of in tool docstrings so it does not load into every
+# turn's context. Only knowledge that exists nowhere else belongs here.
+_TOPICS: dict[str, str] = {
+    "rib": """# get_rib — interface name resolution
+
+All `nextHops[].interfaceName` values are auto-resolved from their raw giid
+form (e.g. "g11") to the friendly network-interface name (e.g. "ge-0-2").
+
+Two KNI (kernel network interface) devices carry fixed giids and resolve
+without an API call. They bridge Linux OS networking to the SSR forwarding
+plane and do not appear in get_network_interfaces:
+  - kni254 (g4294967294): IPv4 KNI, present on all SSR versions.
+  - kni253 (g4294967293): IPv6 KNI, introduced in SSR 7.0.
+
+Giids with no matching network interface (VRF-internal or waypoint
+interfaces) are left as-is.
+
+Routing-engine interface names (e.g. "lo0") are not giids and are not
+resolvable via get_network_interfaces. They are loopback or other interfaces
+owned by the FRR routing process, most often the BGP update-source loopback
+used for BGP-over-SVR sessions. To identify the IP and context: check
+updateSource in get_bgp_neighbors output, and look for auto-generated services
+named _bgp_<routerId>_<interfaceName> in get_services — the service prefix
+field gives the loopback's IP.
+
+A prefix appears under every distinct next-hop value in its nextHops array.
+A recursive BGP route with both a peer IP and a resolved interface appears
+under both.""",
+    "network_interfaces": """# get_network_interfaces — MTU/MSS and giid resolution
+
+## MTU/MSS
+- mtu: the configured MTU on this interface. For IP-routed (non-SVR) traffic,
+  enforcedMss=automatic clamps TCP MSS based on this value.
+- enforcedMss: automatic = SSR clamps TCP MSS; disabled = no clamping.
+- For SVR traffic, MSS clamping uses the path-discovered MTU from
+  list_peer_paths, not this configured value.
+- Even when SVR paths show a valid discovered MTU and enforcedMss is automatic,
+  verify this configured mtu matches the physical network — it governs MSS for
+  all non-SVR traffic through the interface.
+
+## Resolving a giid to a network interface
+Each interface includes a globalId field — the internal global interface ID
+(giid) used by the routing stack. RIB next-hop entries reference interfaces by
+giid in the format 'gX' (e.g. 'g12'). Match the number X against globalId to
+resolve a giid to a network interface name.
+
+## Resolving a source IP to a network interface name (for fib_lookup)
+1. Check whether the source IP falls within the subnet of any interface whose
+   deviceInterface.type is 'ethernet' (forwarding interfaces). If it matches,
+   that interface name is the source_interface. Ignore host-type device
+   interfaces — these are internal SSR interfaces.
+2. If no subnet matches (off-network source), call get_rib with the source IP
+   to get the LPM next-hop, extract the giid from interfaceName (e.g. 'g12'),
+   then match against globalId here to get the interface name.""",
+    "fragmentation": """# get_fragmentation_stats — interpreting the counters
+
+Each counter reports total_change (delta over the window, not the all-time
+total), current_rate, avg_rate, max_rate (events/second), and trend.
+total_change = 0 means no events in the period regardless of historical totals.
+
+## Three scenarios for MTU/MSS slowness or loss
+
+1. SSR is the MTU constraint (sent.ipv4_dont_fragment_drop.total_change > 0):
+   DF-set packets arrived that exceeded the SSR's egress interface MTU. The SSR
+   dropped them and sent ICMP Fragmentation Needed. Always a misconfiguration —
+   lower the interface MTU config or the upstream sender's MSS.
+
+2. SSR is fragmenting non-DF traffic (sent.ipv4_packets_fragmented.total_change
+   > 0, ipv4_dont_fragment_drop.total_change = 0): the SSR is fragmenting packets
+   without DF set — typically UDP from LAN hosts whose MTU exceeds the WAN
+   interface MTU (e.g. LAN=1500, WAN=1492). Sub-optimal but expected; TCP is
+   protected by enforcedMss, UDP has no MSS negotiation.
+
+3. Downstream MTU mismatch (all total_change = 0, but ping DF search fails):
+   the SSR's configured MTU is optimistic — a downstream hop silently drops
+   oversized packets. These counters do NOT fire for this case. Use ping with
+   dont_frag=True + binary search on packet size to detect and confirm.
+
+## Key counters (each reports total_change, current_rate, avg_rate, max_rate, trend)
+  sent.ipv4_dont_fragment_drop        — SSR dropped DF-set packet (always a problem)
+  sent.ipv4_packets_fragmented        — SSR fragmented a non-DF packet (may be expected)
+  sent.ipv4_non_fabric_fragments      — fragments on standard IP-routed paths
+  sent.ipv4_fabric_fragments          — fragments on SVR paths
+  received.successfully_reassembled   — fragmented traffic arriving at SSR
+  received.fragment_chains_timeout    — reassembly timed out (~15s); lost fragments
+  received.failure_to_reassemble      — fragments collected but reassembly failed""",
+    "security_events": """# get_security_events — output fields
+
+Events are newest-first. summarize=True groups by attack type with counts,
+unique source/dest IPs, severity, and action. summarize=False returns one
+cleaned record per event with these fields:
+  timestamp       — UTC time of detection
+  attack          — signature or anomaly name
+  cve_id          — associated CVE if known
+  threat_severity — CRITICAL / HIGH / MEDIUM / LOW / INFO
+  action          — CLOSE (session torn down) / DROP / ALERT
+  is_alert        — true = logged only; false = actively blocked
+  msg_type        — SIG (signature match) or ANOMALY (protocol anomaly)
+  src_addr / src_port / src_interface — attack source
+  dest_addr / dest_port / dest_interface — targeted host
+  protocol        — TCP / UDP / ICMP
+  tenant_name     — SSR tenant the traffic belongs to
+  service_name    — SSR service matched
+  session_id      — SSR session identifier
+  repeat_count    — number of times this attack repeated in the session
+  url             — URL targeted (populated for some HTTP attacks)""",
+}
 
 mcp = FastMCP(
     "SSR — Session Smart Router",
