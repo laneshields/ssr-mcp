@@ -223,7 +223,8 @@ async def get_guidance(topic: str | None = None) -> str:
     point here for detail kept out of their always-loaded description.
 
     Args:
-        topic: (optional) A reference topic. Known topics: 'rib'. An unknown
+        topic: (optional) A reference topic. Known topics: 'fragmentation',
+               'network_interfaces', 'rib', 'security_events'. An unknown
                topic returns the list of available topics.
     """
     if topic is None:
