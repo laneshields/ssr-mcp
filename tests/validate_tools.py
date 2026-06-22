@@ -42,8 +42,12 @@ _env_path = Path(_args.env_file) if _args.env_file else Path(__file__).parent.pa
 load_dotenv(_env_path, override=True)
 
 from ssr_mcp.client import SSRClient
-import ssr_mcp.server as _server
-from ssr_mcp.server import _extract_dhcp_leases, _parse_node_utilization
+import ssr_mcp.server  # noqa: F401 — triggers tool registration in all domain modules
+import ssr_mcp.core as _core
+from ssr_mcp.tools.network import _extract_dhcp_leases
+from ssr_mcp.tools.system import _parse_node_utilization, get_router_health as _get_router_health
+from ssr_mcp.tools.diag import get_dropped_packets as _get_dropped_packets
+from ssr_mcp.tools.appid import get_application_traffic as _get_application_traffic
 from contextlib import contextmanager
 
 # server.py also calls load_dotenv at import time; re-apply to ensure --env-file wins.
@@ -57,12 +61,12 @@ def _inject_client(client: SSRClient):
     Lets us call server-level composite tools (get_router_health, etc.) that
     use get_client() internally, without re-instantiating from env vars.
     """
-    old = _server._client
-    _server._client = client
+    old = _core._client
+    _core._client = client
     try:
         yield
     finally:
-        _server._client = old
+        _core._client = old
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +283,7 @@ async def test_get_routers(c: SSRClient, ctx: TestContext):
 @register()
 async def test_get_router_health(c: SSRClient, ctx: TestContext):
     with _inject_client(c):
-        result = json.loads(await _server.get_router_health(router=ctx.router, node=ctx.node))
+        result = json.loads(await _get_router_health(router=ctx.router, node=ctx.node))
     assert "overall_status" in result
 
 # ---------------------------------------------------------------------------
@@ -372,7 +376,7 @@ async def test_get_rib(c: SSRClient, ctx: TestContext):
     raw = await c.get_rib_summary(ctx.router)
     assert isinstance(raw, dict) and "data" in raw, "get_rib_summary did not return expected shape"
 
-    from ssr_mcp.server import _parse_rib_summary
+    from ssr_mcp.tools.routing import _parse_rib_summary
     parsed = _parse_rib_summary(raw["data"])
     assert parsed, "RIB summary parsed to empty result"
     assert any("ipv4" in af_data for af_data in parsed.values()), "no ipv4 AF in parsed summary"
@@ -406,7 +410,7 @@ async def test_get_rib(c: SSRClient, ctx: TestContext):
     ), "blackhole filter returned entries without blackhole next-hop"
 
     # Next-hop overview (next_hop="*")
-    from ssr_mcp.server import get_rib as server_get_rib
+    from ssr_mcp.tools.routing import get_rib as server_get_rib
     import json as _json
     overview_json = await server_get_rib(router=ctx.router, next_hop="*")
     overview = _json.loads(overview_json)
@@ -516,7 +520,7 @@ async def test_get_session(c: SSRClient, ctx: TestContext):
 @register()
 async def test_get_dropped_packets(c: SSRClient, ctx: TestContext):
     with _inject_client(c):
-        result = json.loads(await _server.get_dropped_packets(router=ctx.router, node=ctx.node, duration=5))
+        result = json.loads(await _get_dropped_packets(router=ctx.router, node=ctx.node, duration=5))
     assert "total_dropped" in result
 
 @register()
@@ -698,7 +702,7 @@ async def test_get_application_series(c: SSRClient, ctx: TestContext):
 @register(requires=["has_http_https"])
 async def test_summarize_app_series_fields(c: SSRClient, ctx: TestContext):
     """Verify _summarize_app_series produces correct fields on real data."""
-    from ssr_mcp.server import _summarize_app_series
+    from ssr_mcp.tools.appid import _summarize_app_series
     buckets = await c.get_application_series(ctx.router, ctx.node, window_minutes=5)
     summary = _summarize_app_series(buckets)
     assert isinstance(summary, list)
@@ -723,7 +727,7 @@ async def test_summarize_app_series_fields(c: SSRClient, ctx: TestContext):
 async def test_get_application_traffic(c: SSRClient, ctx: TestContext):
     with _inject_client(c):
         # view='top'
-        top = json.loads(await _server.get_application_traffic(
+        top = json.loads(await _get_application_traffic(
             router=ctx.router, node=ctx.node, view="top", top_n=5, window_minutes=5
         ))
     assert "applications" in top, "top view missing 'applications'"
@@ -738,7 +742,7 @@ async def test_get_application_traffic(c: SSRClient, ctx: TestContext):
 
     with _inject_client(c):
         # view='tcp_health'
-        health = json.loads(await _server.get_application_traffic(
+        health = json.loads(await _get_application_traffic(
             router=ctx.router, node=ctx.node, view="tcp_health", window_minutes=5, min_sessions=1
         ))
     assert "applications" in health, "tcp_health view missing 'applications'"
@@ -753,7 +757,7 @@ async def test_get_application_traffic(c: SSRClient, ctx: TestContext):
 
     with _inject_client(c):
         # view='clients'
-        clients = json.loads(await _server.get_application_traffic(
+        clients = json.loads(await _get_application_traffic(
             router=ctx.router, node=ctx.node, view="clients", top_n=5, window_minutes=5
         ))
     assert "clients" in clients, "clients view missing 'clients'"
@@ -770,7 +774,7 @@ async def test_get_application_traffic(c: SSRClient, ctx: TestContext):
     if top["applications"]:
         app_name = top["applications"][0]["name"]
         with _inject_client(c):
-            filtered = json.loads(await _server.get_application_traffic(
+            filtered = json.loads(await _get_application_traffic(
                 router=ctx.router, node=ctx.node, view="top",
                 application=app_name[:4], window_minutes=5
             ))
@@ -781,7 +785,7 @@ async def test_get_application_traffic(c: SSRClient, ctx: TestContext):
     if clients["clients"]:
         ip = clients["clients"][0]["client_ip"]
         with _inject_client(c):
-            ip_filtered = json.loads(await _server.get_application_traffic(
+            ip_filtered = json.loads(await _get_application_traffic(
                 router=ctx.router, node=ctx.node, view="clients",
                 client_ip=ip, window_minutes=5
             ))
