@@ -176,11 +176,18 @@ sudo systemctl enable --now ssr-mcp
 
 The server includes built-in prompts that walk Claude through multi-step investigations automatically. Invoke them by name:
 
+| Prompt | What it does |
+|---|---|
+| `health_check` | Conductor-wide triage (unreachable routers, alarms, system state) or single-router deep dive (software, connectivity, resources, IDP). |
+| `troubleshoot_traffic` | Step-by-step connectivity troubleshooting. Accepts optional `router`, `source`, and `destination` to skip the discovery steps. |
+| `troubleshoot_slow_traffic` | Latency and throughput investigation using TCP health signals, retransmissions, and RTT per application. |
+| `explore` | Open-ended discovery walkthrough — summarises the state of a router or the whole authority. |
+
+Examples:
+
 > *"Run the health_check prompt."*
 
-This runs a full health check — conductor-wide triage if connected to a conductor (unreachable routers, active alarms, system state), or a single-router deep dive (software state, connectivity, resources, IDP). You can also target a specific router directly:
-
-> *"Run the health_check prompt for router BOS1."*
+> *"Run the troubleshoot_traffic prompt for router BOS1, source 10.0.1.5, destination Teams."*
 
 ### Freeform questions
 

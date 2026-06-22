@@ -99,21 +99,41 @@ with optional `router:` scope to the local device when omitted.
 
 ## Architecture
 
-Two files make up the entire package:
-
 **`ssr_mcp/client.py` — `SSRClient`**
 Async httpx client targeting the SSR REST and GraphQL APIs. Handles JWT authentication lazily (login deferred until first request) and retries automatically on 401 by re-authenticating once. All REST calls go through `_get()`; GraphQL calls go through `_graphql()`. GraphQL queries are stored as class-level string constants directly above the method that uses them. Paginated endpoints loop internally at `page_size=1000` using either cursor-based (`pageInfo.endCursor`) or offset-based pagination — callers never see pages.
 
 Accepts `port: int = 443` in `__init__`; base URL is `https://{host}:{port}`.
 
-**`ssr_mcp/server.py` — FastMCP tool and prompt definitions**
-Thin `@mcp.tool()` wrappers around every `SSRClient` method. Each tool serialises the result to JSON and returns it as a string. The client singleton is created lazily via `get_client()` on first tool call so the server starts cleanly even without `.env` credentials. Tool docstrings double as the MCP tool descriptions seen by Claude — keep them accurate and include all `Args:` entries.
+**`ssr_mcp/core.py` — shared infrastructure**
+FastMCP instance, transport configuration, `_GUIDANCE` and `_TOPICS` strings, tool-call logging (`_log_tool_call`, `_maybe_log_session_start`), the `_logged_tool` decorator that wraps `mcp.tool` to add logging, and the lazy `get_client()` singleton. `load_dotenv` is called here with the explicit path `Path(__file__).parent.parent / ".env"` and `override=True` so the repo's `.env` always takes precedence over any env vars injected by the MCP host.
 
-`@mcp.prompt()` definitions provide guided multi-step workflows. Each prompt returns a markdown instruction string that tells the model which tools to call, in what order, and how to interpret and present results. Current prompts:
+**`ssr_mcp/tools/` — domain-scoped tool modules**
+Each file registers `@mcp.tool()` functions for a domain area. Tool docstrings double as the MCP tool descriptions seen by Claude — keep them accurate and include all `Args:` entries. Verbose reference content that doesn't need to load on every turn lives in `_TOPICS` in `core.py` and is accessible via `get_guidance(topic=<name>)`.
 
-- `health_check(router=None)` — conductor-wide triage (parallel gather → summary table → offer to drill) or single-router deep dive (software state, connectivity, resources, IDP). Pass a router name to skip straight to the deep dive.
+| Module | Contents |
+|---|---|
+| `meta.py` | `begin_query`, `get_guidance`, `report_issue`, `report_feedback` |
+| `system.py` | Router health, alarms, assets, platform, version, node utilization, capacity, events |
+| `network.py` | Device/network interfaces, DHCP, ARP, VRFs |
+| `sessions.py` | Sessions, trace |
+| `appid.py` | App-ID cache, domain/address lookup, application traffic |
+| `routing.py` | RIB, FIB, FIB lookup, BGP |
+| `services.py` | Services, service paths, peer paths, tenant membership |
+| `diag.py` | Dropped packets, fragmentation stats, metrics, query stats, security events |
 
-`load_dotenv` is called with the explicit path `Path(__file__).parent.parent / ".env"` and `override=True` so the repo's `.env` always takes precedence over any env vars injected by the MCP host.
+**`ssr_mcp/prompts.py` — guided multi-step workflows**
+`@mcp.prompt()` definitions. Each prompt returns a markdown instruction string that tells the model which tools to call, in what order, and how to interpret and present results. Current prompts:
+
+- `troubleshoot_traffic(router, source, destination)` — step-by-step connectivity troubleshooting; all params optional.
+- `health_check(router=None)` — conductor-wide triage or single-router deep dive (software state, connectivity, resources, IDP).
+- `troubleshoot_slow_traffic(router, application)` — latency/throughput investigation using TCP health signals.
+- `explore(router=None)` — open-ended discovery walkthrough for a router or the whole authority.
+
+**`ssr_mcp/resources.py` — MCP resources**
+`@mcp.resource()` definitions exposing router/node/interface lists as structured resources.
+
+**`ssr_mcp/server.py` — entry point**
+Imports all domain modules (triggering tool registration) and defines `main()`, which runs the server over stdio or HTTP depending on `SSR_MCP_TRANSPORT`.
 
 ## Tool-call logging
 
@@ -263,6 +283,6 @@ sustained or historical before treating it as a confirmed problem.
 ## Adding a new tool
 
 1. Add a method to `SSRClient` in `client.py`.
-2. Add a `@mcp.tool()` async function in `server.py` that calls the new method and returns `json.dumps(result, indent=2)`.
+2. Add a `@mcp.tool()` async function in the appropriate domain module under `ssr_mcp/tools/` that calls the new method and returns `json.dumps(result, indent=2)`.
 
 The MCP server entry point is `ssr_mcp/server.py:main()`, registered as the `ssr-mcp` script in `pyproject.toml`.
